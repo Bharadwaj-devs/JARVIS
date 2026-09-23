@@ -18,7 +18,9 @@ Diagnose and then fix the reported sleep/wake state transition bug:
 
 AWAKE -> manual Sleep -> SLEEPING -> sometimes immediately AWAKE
 
-Observed behaviour may repeat several times before the assistant remains asleep.
+The unintended transition from SLEEPING back to AWAKE is the bug. It may repeat several times after a manual Sleep command.
+
+Once JARVIS remains in SLEEPING, that is the expected behaviour. Saying the wake word afterward should wake JARVIS normally.
 
 A related upstream Mark LIV issue concerns unreliable sleep/wake resumption. Treat that as context, not proof of the local root cause.
 
