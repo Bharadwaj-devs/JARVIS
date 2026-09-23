@@ -260,14 +260,20 @@ Current user-observed behaviour:
 ```text
 USER clicks SLEEP
     ↓
-JARVIS sleeps
+JARVIS enters SLEEPING as intended
     ↓
-JARVIS immediately wakes
+JARVIS sometimes immediately wakes on its own
     ↓
-repeated several times
+this may repeat several times
     ↓
-finally remains asleep
+eventually JARVIS remains SLEEPING normally
+    ↓
+user says the wake word
+    ↓
+JARVIS wakes normally
 ```
+
+The bug is the unintended wake after an explicit Sleep command. Remaining asleep afterward is the expected behaviour.
 
 The same physical control is used for wake and sleep, so state transitions must be atomic and race-safe.
 
@@ -997,3 +1003,512 @@ accept
 # 19. PHASE 6 — COMPUTER INTELLIGENCE
 
 Treat the computer as a stateful environment.
+Important entities:
+
+```text
+APP
+WINDOW
+TAB
+FILE
+FOLDER
+WEBSITE
+PERSON
+PROJECT
+DEVICE
+SETTING
+```
+
+Each stateful operation should define:
+
+```text
+requested_state
+attempt_method
+evidence
+verification_rule
+failure_reason
+```
+
+This is where the broader browser/camera/app issue backlog is resolved systematically rather than as isolated patches.
+
+---
+
+# 20. PHASE 7 — SYSTEM INTELLIGENCE
+
+Target:
+
+`core/diagnostics.py`
+
+Provide a unified health model:
+
+```text
+FULLY_OPERATIONAL
+PARTIALLY_OPERATIONAL
+TEMPORARILY_UNAVAILABLE
+FAILED
+```
+
+Diagnostics should be able to answer:
+
+```text
+What is running?
+What is broken?
+What is waiting?
+What is consuming resources?
+What task is active?
+What recently failed?
+```
+
+---
+
+# 21. PHASE 8 — PROACTIVE JARVIS
+
+Build on the existing proactive engine.
+
+Proactive behavior must be:
+
+- useful,
+- context-aware,
+- time-appropriate,
+- interrupt-safe,
+- suppressed by quiet/focus/privacy settings.
+
+Long-running completion reports are event-driven task outputs, not generic proactive chatter.
+
+---
+
+# 22. PHASE 9 — SECURITY / IDENTITY
+
+Move the upstream security concerns into a dedicated phase.
+
+Relevant upstream security issue:
+
+### #2 — Tool prompt injection / API-key storage
+
+The issue raises concerns about unrestricted high-impact tools being driven by model output, as well as plaintext API-key storage.
+
+Reference:
+`https://github.com/FatihMakes/Mark-LIV/issues/2`
+
+This phase may introduce:
+
+```text
+authorization tiers
+sensitive-action policies
+credential-manager integration
+privacy mode
+audit trail
+```
+
+The existing `core/confirm.py` remains the base for human confirmation of genuinely irreversible actions.
+
+---
+
+# 23. PHASE 10 — PRESENCE / HUD / DASHBOARD
+
+The existing PyQt6/QPainter UI remains the presentation layer.
+
+Target direction:
+
+```text
+charcoal / black background
+orange / amber visual language
+central JARVIS core/avatar
+left navigation
+right activity/task panel
+bottom command bar
+system metrics
+notifications
+active-task state
+```
+
+The UI consumes structured truth from the core.
+
+It must never decide:
+
+```text
+whether an app opened
+whether a task completed
+whether a routine should exist
+whether a confirmation is valid
+```
+
+---
+
+# 24. PHASE 11 — ROUTINES / ADVANCED AUTONOMY
+
+Recurring routines may be created only through:
+
+```text
+explicit user command
+OR
+explicit user acceptance of a proposal
+```
+
+Autonomous workflows require:
+
+```text
+max steps
+max duration
+max retries
+resource limits
+cancellation
+verification
+audit trail
+```
+
+---
+
+# 25. PHASE 12 — CONTROLLED SELF-IMPROVEMENT
+
+Self-improvement is deliberately last.
+
+Required pipeline:
+
+```text
+OBSERVE
+  ↓
+DIAGNOSE
+  ↓
+PROPOSE
+  ↓
+ISOLATE
+  ↓
+TEST
+  ↓
+BENCHMARK
+  ↓
+VERIFY
+  ↓
+VERSION
+  ↓
+APPROVE
+  ↓
+DEPLOY
+  ↓
+MONITOR
+  ↓
+ROLLBACK
+```
+
+The live system must never be allowed to rewrite its own:
+
+- authorization logic,
+- security boundaries,
+- emergency shutdown,
+- rollback mechanism,
+- recovery invariants.
+
+---
+
+# 26. CONFIGURATION CONTRACT
+
+New optional subsystems must extend the existing `memory/config_manager.py` mechanism.
+
+Relevant reliability settings should include at minimum:
+
+| Setting | Default | Purpose |
+|---|---:|---|
+| `watchdog_enabled` | `true` | Tool-result watchdog master switch |
+| `watchdog_timeout` | `6` | Result-delivery timeout in seconds |
+| `wake_word_enabled` | existing config | Enable local wake word |
+| `wake_word_sensitivity` | `medium` | Detection sensitivity profile |
+| `wake_cooldown` | safe bounded value | Prevent duplicate/re-entrant wake transitions |
+| `voice_barge_enabled` | `false` | Experimental voice interruption |
+| `verification_enabled` | `true` | Verification master switch |
+| `diagnostics` | `true` | Reliability diagnostics |
+| `privacy_mode` | `false` | Restrict persistence/proactive behavior |
+
+Every added setting must have a safe default.
+
+---
+
+# 27. TESTING CONTRACT
+
+## 27.1 Unit tests
+
+Use for:
+
+- state transitions,
+- wake re-arm logic,
+- cooldown logic,
+- verification predicates,
+- result classification,
+- watchdog state transitions.
+
+## 27.2 Integration tests
+
+Use for:
+
+- tool registration,
+- execution-state propagation,
+- UI callback wiring,
+- confirmation/undo interaction,
+- reconnect interaction,
+- task/tool interaction later.
+
+## 27.3 Live tests
+
+Mandatory for:
+
+- microphone,
+- speakers,
+- wake word,
+- sleep/resume,
+- app launching,
+- browser navigation,
+- file state,
+- window focus,
+- camera/screen interaction,
+- notification timing.
+
+---
+
+# 28. EVIDENCE LEVELS
+
+```text
+LEVEL 0 — model says it happened
+LEVEL 1 — tool returned success
+LEVEL 2 — process/resource exists
+LEVEL 3 — requested state observed
+LEVEL 4 — requested state persists after a stability check
+```
+
+The assistant must only use strong completion language when the evidence is strong enough for the operation.
+
+Examples:
+
+```text
+LEVEL 1:
+"The launch command was accepted."
+
+LEVEL 2:
+"Chrome is running."
+
+LEVEL 3:
+"Chrome's window is open and focused."
+
+LEVEL 4:
+"Chrome remains open and focused after the stability check."
+```
+
+This vocabulary should eventually be reflected in task state and audit records.
+
+---
+
+# 29. CODING-AGENT OPERATING CONTRACT
+
+Every implementation task must contain:
+
+```text
+OBJECTIVE
+SCOPE
+FILES ALLOWED TO CHANGE
+FILES FORBIDDEN TO CHANGE
+EXISTING MECHANISMS TO REUSE
+TESTS
+LIVE VALIDATION
+ROLLBACK POINT
+```
+
+Before editing, the coding agent must inspect the exact current implementation.
+
+During editing it must not:
+
+- rewrite unrelated modules,
+- create a duplicate mechanism,
+- move architectural state into UI widgets,
+- silently broaden scope.
+
+After editing it must:
+
+- run syntax/import checks,
+- run focused tests,
+- perform relevant live validation,
+- report what changed,
+- report what remains unverified.
+
+Failure protocol:
+
+```text
+STOP
+↓
+IDENTIFY SHARED BOUNDARY
+↓
+REPRODUCE
+↓
+LOCATE ROOT CAUSE
+↓
+PATCH SMALLEST LAYER
+↓
+RETEST
+```
+
+---
+
+# 30. FIRST FIVE CODING TASKS AFTER V3
+
+These are the first tasks to hand to the coding agent. Do not collapse them into one giant prompt.
+
+## Task 1 — Sleep/Wake Race Reproduction + Instrumentation
+
+Inspect and instrument:
+
+```text
+main.py
+core/wake_word.py
+ui.py wake/sleep callbacks
+```
+
+Do not redesign yet.
+
+Goal:
+
+```text
+prove exactly how a stale wake event can reverse manual sleep
+OR
+prove that the wake detector is not the cause
+```
+
+Acceptance test:
+
+```text
+10 repeated manual sleep/wake cycles
++ stale-event reproduction attempt
++ event ordering logged
+```
+
+## Task 2 — Sleep/Wake State Fix
+
+Only after Task 1 identifies the boundary.
+
+Goal:
+
+```text
+manual sleep cannot be reversed by stale wake detections
+no duplicate wake from one phrase
+```
+
+Acceptance test:
+
+```text
+10 repeated toggles
+system sleep/resume
+wake-word enabled
+no immediate wake after manual sleep
+```
+
+## Task 3 — Microphone Path Instrumentation
+
+Inspect and instrument:
+
+```text
+main.py:_listen_audio
+main.py:_send_realtime
+core/echo.py
+core/audio_devices.py
+```
+
+Goal:
+
+```text
+identify exactly where user speech is discarded or delayed
+```
+
+No threshold redesign before the discard path is known.
+
+## Task 4 — Microphone Reliability Fix
+
+Patch the smallest proven boundary.
+
+Acceptance:
+
+```text
+user speech reaches Gemini reliably
+no permanent speaking-state lockout
+no unexplained queue starvation
+```
+
+## Task 5 — Truthful Tool Failure Channel
+
+Inspect and patch:
+
+```text
+main.py::_execute_tool
+main.py::speak_error
+```
+
+Acceptance:
+
+```text
+forced tool exception
+→ [TOOL_FAILED] FunctionResponse
+→ no fake user turn
+→ no duplicate spoken response
+```
+
+Only after these five tasks should application/file verification and the result-delivery watchdog be implemented.
+
+---
+
+# 31. LONG-TERM FILE MAP
+
+| File | Responsibility | Strategy |
+|---|---|---|
+| `main.py` | Live session/orchestration | extend carefully |
+| `ui.py` | presentation/HUD | presentation only |
+| `core/wake_word.py` | wake detection | harden |
+| `core/echo.py` | echo discrimination | measure + tune |
+| `core/audio_devices.py` | device discovery/resolution | preserve |
+| `core/hotkey.py` | PTT | preserve |
+| `core/confirm.py` | human authorization | preserve/extend |
+| `core/undo.py` | reversible actions | preserve/extend |
+| `core/action_loader.py` | action discovery | preserve |
+| `core/plugin_loader.py` | plugin discovery | preserve |
+| `core/tasks.py` | task state | future/new |
+| `core/diagnostics.py` | system diagnostics | future/new |
+| `core/ops_metrics.py` | operational metrics | future/new |
+| `memory/memory_manager.py` | persistent user memory | preserve |
+| `memory/lessons_manager.py` | lessons | future/new |
+| `memory/routines_manager.py` | recurring routines | future/new |
+| `actions/open_app.py` | application operations | add verification |
+| `actions/file_controller.py` | file operations | add verification |
+| `actions/browser_control.py` | browser operations | add state verification later |
+| `actions/screen_processor.py` | screen/camera | preserve, improve later |
+| `dashboard/*` | remote control | after local reliability |
+| `core/prompt.txt` | communication/behavior | Phase 2 |
+
+---
+
+# 32. DEFINITION OF A RELIABLE MARK LIV → MARK 54
+
+A reliable Mark 54 system behaves like this:
+
+```text
+I speak.
+   ↓
+JARVIS reliably receives me.
+   ↓
+JARVIS understands the objective.
+   ↓
+JARVIS acts.
+   ↓
+JARVIS knows which state the operation is in.
+   ↓
+JARVIS verifies what actually happened.
+   ↓
+JARVIS tells me the truth.
+   ↓
+If something fails, JARVIS recovers intelligently or reports the failure.
+   ↓
+If the task takes time, JARVIS owns it without blocking the conversation.
+   ↓
+Only then does JARVIS learn, personalize and act proactively.
+```
+
+The central development standard is:
+
+> **Fix the machine we actually have before building the machine we eventually want.**
+
+And the first release objective is:
+
+> **Make JARVIS dependable at hearing, sleeping/waking, executing, verifying and reporting before adding more autonomy.**
