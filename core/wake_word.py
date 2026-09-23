@@ -21,6 +21,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -129,6 +130,10 @@ class WakeWordDetector:
         self._model = None
         self._ready = False
 
+    def _diagnostic(self, message: str) -> None:
+        """Write detector ordering diagnostics without touching the audio path."""
+        self._logger(f"Wake diagnostic: {message}")
+
     def start(self) -> bool:
         """Load the model and spawn the inference thread. Returns True on success.
         Safe to call again — a no-op if already running. Never raises."""
@@ -163,6 +168,10 @@ class WakeWordDetector:
     def ready(self) -> bool:
         return self._ready
 
+    @property
+    def running(self) -> bool:
+        return self._running
+
     def feed(self, frame_int16) -> None:
         """Called from the mic callback (real-time thread). Must stay cheap and
         never block — the frame is copied and dropped if the queue is backed up."""
@@ -184,6 +193,7 @@ class WakeWordDetector:
                 frame = self._queue.get()
                 if frame is None or not self._running:
                     break
+                inference_started_at = time.time()
                 scores = self._model.predict(np.asarray(frame, dtype=np.int16))
                 score = 0.0
                 if isinstance(scores, dict):
@@ -195,10 +205,27 @@ class WakeWordDetector:
                         score = max(float(v) for v in scores.values())
                 if score >= self._threshold:
                     # drain any backlog so we don't double-fire on the same utterance
+                    backlog = self._queue.qsize()
                     self._drain()
+                    detected_at = time.time()
+                    state = "running" if self._running else "stopped"
+                    self._diagnostic(
+                        f"event=candidate inference_started={inference_started_at:.6f} "
+                        f"detected={detected_at:.6f} score={score:.4f} "
+                        f"queue_before_drain={backlog}"
+                    )
                     try:
-                        self._on_detect()
+                        result = self._on_detect()
+                        outcome = str(result) if result is not None else "callback-returned"
+                        self._diagnostic(
+                            f"event=detected timestamp={detected_at:.6f} "
+                            f"detector={state} outcome={outcome}"
+                        )
                     except Exception as e:
+                        self._diagnostic(
+                            f"event=detected timestamp={detected_at:.6f} "
+                            f"detector={state} outcome=callback-error"
+                        )
                         self._logger(f"Wake word: on_detect error — {e}")
             except Exception as e:
                 self._logger(f"Wake word: inference error — {e}")

@@ -636,6 +636,7 @@ class JarvisLive:
         self._awake            = not self._wake_enabled
         self._wake_detector: WakeWordDetector | None = None
         self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
+        self._wake_diag_lock = threading.Lock()
 
         # Restore the saved push-to-talk preference. Doing it here rather than
         # in __init__ means the hotkey thread only exists once there is a
@@ -674,24 +675,66 @@ class JarvisLive:
 
     def _on_wake_detected(self) -> None:
         """Called from the detector thread when 'Hey Jarvis' is heard."""
-        self.wake(reason="wake word")
+        received_at = time.time()
+        detector = self._wake_detector
+        detector_state = "running" if detector and detector.running else "stopped"
+        awake_before = self._awake
+        result = self.wake(reason="wake word", source="wake-word")
+        self._wake_diagnostic(
+            f"event=wake-word timestamp={received_at:.6f} "
+            f"state_before={'AWAKE' if awake_before else 'SLEEPING'} "
+            f"enabled={self._wake_enabled} detector={detector_state} "
+            f"outcome={result}"
+        )
+        return result
 
-    def wake(self, reason: str = "wake word") -> None:
+    def _wake_diagnostic(self, message: str) -> None:
+        with self._wake_diag_lock:
+            print(
+                f"[WakeDiag] timestamp={time.time():.6f} "
+                f"thread={threading.current_thread().name} {message}"
+            )
+
+    def _record_state_transition(self, requested: str, previous: bool,
+                                 new: bool, source: str) -> None:
+        self._wake_diagnostic(
+            f"event=state-transition requested={requested} "
+            f"previous={'AWAKE' if previous else 'SLEEPING'} "
+            f"new={'AWAKE' if new else 'SLEEPING'} source={source}"
+        )
+
+    def wake(self, reason: str = "wake word", source: str = "unknown") -> str:
+        previous = self._awake
         if self._awake:
-            return
+            self._wake_diagnostic(
+                f"event=state-request requested=WAKE "
+                f"previous=AWAKE new=AWAKE source={source} result=rejected "
+                f"reason=already-awake"
+            )
+            return "rejected:already-awake"
         self._awake = True
+        self._record_state_transition("WAKE", previous, self._awake, source)
         self._last_user_speech = time.monotonic()   # start the auto-sleep clock now
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
         self.ui.write_log(f"SYS: Awake — {reason}.")
+        return "accepted"
 
-    def sleep(self, reason: str = "timeout") -> None:
+    def sleep(self, reason: str = "timeout", source: str = "unknown") -> str:
+        previous = self._awake
         if not self._awake:
-            return
+            self._wake_diagnostic(
+                f"event=state-request requested=SLEEP "
+                f"previous=SLEEPING new=SLEEPING source={source} result=rejected "
+                f"reason=already-sleeping"
+            )
+            return "rejected:already-sleeping"
         self._awake = False
+        self._record_state_transition("SLEEP", previous, self._awake, source)
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
         self.ui.write_log(f"SYS: Sleeping — {reason}. Say 'Hey Jarvis' to wake me.")
+        return "accepted"
 
     async def _run_sleep_watch(self) -> None:
         """Auto-sleep after the configured silence window (wake-word mode only)."""
@@ -704,7 +747,7 @@ class JarvisLive:
             if speaking:
                 continue
             if (time.monotonic() - self._last_user_speech) > self._wake_sleep_timeout:
-                self.sleep(reason="no speech for 2 minutes")
+                self.sleep(reason="no speech for 2 minutes", source="automatic sleep")
 
     # ── Wake word: UI callbacks (called from the Qt thread) ──────────────────
 
@@ -717,12 +760,12 @@ class JarvisLive:
             self._wake_enabled = True
             save_wake_word_enabled(True)
             self._ensure_wake_detector()
-            self.sleep(reason="wake word enabled")
+            self.sleep(reason="wake word enabled", source="UI/manual")
             return "enabled"
         else:
             self._wake_enabled = False
             save_wake_word_enabled(False)
-            self.wake(reason="wake word disabled")
+            self.wake(reason="wake word disabled", source="UI/manual")
             return "disabled"
 
     def _ui_wake_manual(self) -> None:
@@ -730,9 +773,9 @@ class JarvisLive:
         if not self._wake_enabled:
             return
         if self._awake:
-            self.sleep(reason="you tapped sleep")
+            self.sleep(reason="you tapped sleep", source="UI/manual")
         else:
-            self.wake(reason="you tapped wake")
+            self.wake(reason="you tapped wake", source="UI/manual")
 
     def _ui_wake_install(self) -> tuple[bool, str]:
         """Download openwakeword + the model (runs in a UI worker thread)."""
@@ -904,7 +947,11 @@ class JarvisLive:
             # Holding the key is also a way to wake it, so push-to-talk works
             # without having to say the wake word first.
             if self._wake_enabled and not self._awake:
+                previous = self._awake
                 self._awake = True
+                self._record_state_transition(
+                    "WAKE", previous, self._awake, "UI/manual"
+                )
                 self._last_user_speech = time.monotonic()
         try:
             self.ui.set_state("LISTENING" if held else "SLEEPING")
@@ -2026,7 +2073,7 @@ class JarvisLive:
                     # A remote command is deliberate control and the phone user
                     # has no desktop WAKE button — so it wakes JARVIS if asleep.
                     if self._wake_enabled and not self._awake:
-                        self.wake(reason="remote command")
+                        self.wake(reason="remote command", source="UI/manual")
                     await self.session.send_client_content(
                         turns={"role": "user", "parts": [{"text": text}]},
                         turn_complete=True,
@@ -2121,11 +2168,21 @@ class JarvisLive:
                     # until the user says "Hey Jarvis" or taps wake in the UI.
                     if self._wake_enabled:
                         self._ensure_wake_detector()
+                        previous = self._awake
                         self._awake = False
+                        if previous != self._awake:
+                            self._record_state_transition(
+                                "SLEEP", previous, self._awake, "shutdown/session"
+                            )
                         self.ui.set_state("SLEEPING")
                         self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
                     else:
+                        previous = self._awake
                         self._awake = True
+                        if previous != self._awake:
+                            self._record_state_transition(
+                                "WAKE", previous, self._awake, "shutdown/session"
+                            )
                         self.ui.set_state("LISTENING")
                         self.ui.write_log("SYS: JARVIS online.")
 
