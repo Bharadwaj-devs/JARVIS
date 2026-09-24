@@ -1,7 +1,7 @@
 # JARVIS Architecture Blueprint V3 — Mark LIV (54)
 
 **Status:** Engineering specification / working constitution  
-**Updated:** 2026-09-22  
+**Updated:** 2026-09-24  
 **Canonical development repository:** `Bharadwaj-devs/JARVIS`  
 **Frozen foundation tag:** `v0.1.0` — Mark LIV Foundation  
 **Foundation commit:** `1078760a65e622bb1aa65dad09e0cea953834bfe`  
@@ -1349,7 +1349,7 @@ RETEST
 
 These are the first tasks to hand to the coding agent. Do not collapse them into one giant prompt.
 
-## Task 1 — Sleep/Wake Race Reproduction + Instrumentation
+## Task 1 — Sleep/Wake Race Reproduction + Instrumentation — COMPLETE
 
 Inspect and instrument:
 
@@ -1377,7 +1377,7 @@ Acceptance test:
 + event ordering logged
 ```
 
-## Task 2 — Sleep/Wake State Fix
+## Task 2 — Sleep/Wake State Fix — COMPLETE
 
 Only after Task 1 identifies the boundary.
 
@@ -1397,7 +1397,7 @@ wake-word enabled
 no immediate wake after manual sleep
 ```
 
-## Task 3 — Microphone Path Instrumentation
+## Task 3 — Microphone Path Instrumentation — NEXT (PHASE 1B)
 
 Inspect and instrument:
 
