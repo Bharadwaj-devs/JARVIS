@@ -133,6 +133,9 @@ class WakeWordDetector:
         self._ready = False
         self._fed_frames = 0
         self._ignored_frames = 0
+        # Epoch-aware model reset (prevents cross-Sleep contamination)
+        self._model_reset_for_epoch: int = -1
+        self._sleep_epoch: int | None = None
 
     def _diagnostic(self, message: str) -> None:
         """Write detector ordering diagnostics without touching the audio path."""
@@ -182,6 +185,13 @@ class WakeWordDetector:
         self._model = None
         self._ready = False
 
+    def on_sleep(self, sleep_epoch: int) -> None:
+        """Called from main thread on accepted Sleep transition.
+        Sets the authoritative Sleep epoch; frames older than this will be dropped.
+        """
+        self._sleep_epoch = sleep_epoch
+        self._diagnostic(f"event=sleep-epoch-set sleep_epoch={sleep_epoch}")
+
     @property
     def ready(self) -> bool:
         return self._ready
@@ -229,6 +239,25 @@ class WakeWordDetector:
                     frame, epoch = item
                 else:
                     frame, epoch = item, None
+
+                # 1) Drop frames captured before the current Sleep boundary
+                if self._sleep_epoch is not None and epoch is not None and epoch < self._sleep_epoch:
+                    self._diagnostic(
+                        f"event=frame-dropped source=wake-detector "
+                        f"reason=pre-sleep-epoch epoch={epoch} sleep_epoch={self._sleep_epoch}"
+                    )
+                    continue
+
+                # 2) Auto-reset model when epoch advances (first post-Sleep frame)
+                if epoch is not None and epoch > self._model_reset_for_epoch:
+                    if self._model is not None:
+                        self._model.reset()
+                    self._model_reset_for_epoch = epoch
+                    self._diagnostic(
+                        f"event=model-auto-reset epoch={epoch}"
+                    )
+
+                # 3) Only then run inference
                 inference_started_at = time.time()
                 scores = self._model.predict(np.asarray(frame, dtype=np.int16))
                 score = 0.0
@@ -240,15 +269,12 @@ class WakeWordDetector:
                     if score == 0.0 and scores:
                         score = max(float(v) for v in scores.values())
                 if score >= self._threshold:
-                    # drain any backlog so we don't double-fire on the same utterance
-                    backlog = self._queue.qsize()
-                    self._drain()
                     detected_at = time.time()
                     state = "running" if self._running else "stopped"
                     self._diagnostic(
                         f"event=candidate inference_started={inference_started_at:.6f} "
                         f"detected={detected_at:.6f} score={score:.4f} "
-                        f"queue_before_drain={backlog}"
+                        f"epoch={epoch}"
                     )
                     try:
                         self._diagnostic(
@@ -261,6 +287,10 @@ class WakeWordDetector:
                             f"event=detected timestamp={detected_at:.6f} "
                             f"detector={state} epoch={epoch} outcome={outcome}"
                         )
+                        # 4) Only drain queue on ACCEPTED wake
+                        if result == "accepted":
+                            self._drain()
+                            self._diagnostic(f"event=queue-drained source=wake-detector reason=accepted-wake")
                     except Exception as e:
                         self._diagnostic(
                             f"event=detected timestamp={detected_at:.6f} "

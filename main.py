@@ -641,6 +641,16 @@ class JarvisLive:
         self._wake_epoch = 0
         self._mic_callback_frames = 0
         self._pc_mic_batch_id = 0
+        # Capture-time boundary (PortAudio stream time ↔ Python monotonic correlation)
+        self._stream_time_base: float | None = None
+        self._sleep_stream_time: float | None = None
+        # Authoritative Sleep boundary in monotonic time (survives InputStream recreation)
+        self._sleep_monotonic_time: float | None = None
+        # Stream-time validity tracking (for backend-robust fallback)
+        self._input_latency: float | None = None
+        self._stream_time_valid: bool = True
+        self._last_current_time: float = -1.0
+        self._zero_timestamp_count: int = 0
         self._wake_diagnostic(
             f"event=wake-state-initialized source=JarvisLive.__init__ "
             f"jarvis_id={id(self)} "
@@ -833,6 +843,15 @@ class JarvisLive:
                 f"wake_state={self._wake_diagnostic_state()}"
             )
             return result
+        # Clear sleep boundary on accepted wake
+        if self._sleep_stream_time is not None or self._sleep_monotonic_time is not None:
+            self._wake_diagnostic(
+                f"event=sleep-boundary-cleared source=wake() "
+                f"previous_sleep_stream_time={self._sleep_stream_time} "
+                f"previous_sleep_monotonic_time={self._sleep_monotonic_time}"
+            )
+            self._sleep_stream_time = None
+            self._sleep_monotonic_time = None
         self._record_state_transition("WAKE", previous, self._awake, source)
         self._last_user_speech = time.monotonic()   # start the auto-sleep clock now
         if not self.ui.muted:
@@ -853,6 +872,24 @@ class JarvisLive:
             else:
                 self._awake = False
                 self._wake_epoch += 1
+                # Record Sleep boundary in monotonic time (authoritative, survives InputStream recreation)
+                self._sleep_monotonic_time = time.monotonic()
+                # Also record in stream time if correlation is established
+                if self._stream_time_base is not None:
+                    self._sleep_stream_time = self._sleep_monotonic_time - self._stream_time_base
+                    self._wake_diagnostic(
+                        f"event=sleep-boundary-recorded source=sleep() "
+                        f"sleep_stream_time={self._sleep_stream_time:.6f} "
+                        f"sleep_monotonic_time={self._sleep_monotonic_time:.6f} "
+                        f"stream_time_base={self._stream_time_base:.6f} "
+                        f"epoch={self._wake_epoch}"
+                    )
+                else:
+                    self._wake_diagnostic(
+                        f"event=sleep-boundary-recorded-monotonic source=sleep() "
+                        f"sleep_monotonic_time={self._sleep_monotonic_time:.6f} "
+                        f"reason=stream-time-base-not-yet-established epoch={self._wake_epoch}"
+                    )
                 result = "accepted"
         if result != "accepted":
             self._wake_diagnostic(
@@ -861,6 +898,13 @@ class JarvisLive:
                 f"reason=already-sleeping"
             )
             return result
+        # Notify detector of Sleep epoch (triggers model reset on first post-Sleep frame)
+        if self._wake_detector is not None:
+            self._wake_detector.on_sleep(self._wake_epoch)
+            self._wake_diagnostic(
+                f"event=detector-sleep-notified source=sleep() "
+                f"sleep_epoch={self._wake_epoch}"
+            )
         self._record_state_transition("SLEEP", previous, self._awake, source)
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
@@ -1555,6 +1599,30 @@ class JarvisLive:
                 f"detector_running={bool(detector_at_entry and detector_at_entry.running)} "
                 f"epoch={entry_epoch} authoritative_epoch={authoritative_epoch}"
             )
+            # ── Stream-time correlation (PortAudio stream time → Python monotonic) ──
+            # Establish on first callback of this InputStream lifetime.
+            if self._stream_time_base is None:
+                # time_info.currentTime is stream time at callback entry.
+                # Monotonic time now minus stream time gives the stream-time epoch.
+                self._stream_time_base = time.monotonic() - time_info.currentTime
+                self._wake_diagnostic(
+                    f"event=stream-time-base-established source=pc-microphone "
+                    f"pc_batch_id={pc_batch_id} "
+                    f"stream_time_base={self._stream_time_base:.6f} "
+                    f"currentTime={time_info.currentTime:.6f} "
+                    f"monotonic={time.monotonic():.6f}"
+                )
+                # If we are currently sleeping and have an authoritative monotonic Sleep boundary,
+                # reconstruct the stream-time boundary for this new InputStream clock.
+                if self._sleep_monotonic_time is not None:
+                    self._sleep_stream_time = self._sleep_monotonic_time - self._stream_time_base
+                    self._wake_diagnostic(
+                        f"event=sleep-boundary-reconstructed source=pc-microphone "
+                        f"sleep_stream_time={self._sleep_stream_time:.6f} "
+                        f"sleep_monotonic_time={self._sleep_monotonic_time:.6f} "
+                        f"stream_time_base={self._stream_time_base:.6f} "
+                        f"pc_batch_id={pc_batch_id}"
+                    )
             # ── Wake-word gate ───────────────────────────────────────────────
             # While asleep, the mic audio NEVER goes to Gemini (nothing is
             # streamed, so JARVIS can't respond to speech not addressed to it and
@@ -1564,6 +1632,70 @@ class JarvisLive:
             # is off (default) or we're awake, this is a single boolean check.
             awake, epoch = self._wake_snapshot()
             if self._wake_enabled and not awake:
+                # ── Stream-time validity tracking ──
+                # Track whether PortAudio stream timestamps (currentTime, inputBufferAdcTime)
+                # are advancing. If not, fall back to monotonic + input_latency.
+                cb_monotonic = time.monotonic()
+                pa_current = float(time_info.currentTime)
+                pa_adc = float(time_info.inputBufferAdcTime)
+
+                # Detect non-advancing / zero timestamps
+                if pa_current <= self._last_current_time or pa_adc == 0.0:
+                    self._zero_timestamp_count += 1
+                    if self._zero_timestamp_count >= 3:
+                        if self._stream_time_valid:
+                            self._stream_time_valid = False
+                            self._wake_diagnostic(
+                                f"event=stream-time-invalid source=pc-microphone "
+                                f"reason=non-advancing-zero-timestamps "
+                                f"zero_count={self._zero_timestamp_count} "
+                                f"currentTime={pa_current:.6f} inputBufferAdcTime={pa_adc:.6f} "
+                                f"pc_batch_id={pc_batch_id}"
+                            )
+                else:
+                    self._last_current_time = pa_current
+                    self._zero_timestamp_count = 0
+
+                # ── Capture-time boundary (hybrid: stream-time or monotonic fallback) ──
+                # Determine estimated capture interval [capture_start, capture_end]
+                if self._stream_time_valid and self._sleep_stream_time is not None:
+                    # Primary: PortAudio stream time
+                    capture_start = pa_adc
+                    block_duration = frames / SEND_SAMPLE_RATE
+                    capture_end = capture_start + block_duration
+                    sleep_boundary = self._sleep_stream_time
+                    clock_domain = "stream-time"
+                elif self._sleep_monotonic_time is not None and self._input_latency is not None:
+                    # Fallback: monotonic time minus input latency
+                    capture_end = cb_monotonic - self._input_latency
+                    block_duration = frames / SEND_SAMPLE_RATE
+                    capture_start = capture_end - block_duration
+                    sleep_boundary = self._sleep_monotonic_time
+                    clock_domain = "monotonic-fallback"
+                else:
+                    # No sleep boundary established yet, or no latency available
+                    capture_start = capture_end = sleep_boundary = 0.0
+                    clock_domain = "none"
+
+                if sleep_boundary > 0.0:
+                    if capture_end <= sleep_boundary:
+                        self._wake_diagnostic(
+                            f"event=detector-feed-dropped source=pc-microphone "
+                            f"clock={clock_domain} reason=pre-sleep-block "
+                            f"capture_start={capture_start:.6f} capture_end={capture_end:.6f} "
+                            f"sleep_boundary={sleep_boundary:.6f} pc_batch_id={pc_batch_id}"
+                        )
+                        return
+                    elif capture_start < sleep_boundary:
+                        self._wake_diagnostic(
+                            f"event=detector-feed-dropped source=pc-microphone "
+                            f"clock={clock_domain} reason=straddles-sleep "
+                            f"capture_start={capture_start:.6f} capture_end={capture_end:.6f} "
+                            f"sleep_boundary={sleep_boundary:.6f} pc_batch_id={pc_batch_id}"
+                        )
+                        return
+                    # else: capture_start >= sleep_boundary → entirely after Sleep, feed normally
+
                 det = self._wake_detector
                 self._wake_diagnostic(
                     f"event=microphone-sleep-gate source=microphone "
@@ -1580,7 +1712,7 @@ class JarvisLive:
                         f"entry_epoch={entry_epoch} epoch={epoch} "
                         f"wake_state={self._wake_diagnostic_state()}"
                     )
-                    det.feed(indata, epoch=epoch)
+                    det.feed(indata, epoch=entry_epoch)
                     self._wake_diagnostic(
                         f"event=detector-feed-after source=pc-microphone "
                         f"producer=_listen_audio.callback pc_batch_id={pc_batch_id} "
@@ -1701,6 +1833,20 @@ class JarvisLive:
                     f"SYS: Microphone '{_mic_name}' unavailable — using system default."
                 )
                 _mic_stream = _open_mic(None)
+
+            # Capture stream input latency for fallback timing
+            self._input_latency = float(_mic_stream.latency)
+            # New InputStream lifetime → reset stream-time correlation
+            self._stream_time_base = None
+            self._sleep_stream_time = None
+            self._stream_time_valid = True
+            self._last_current_time = -1.0
+            self._zero_timestamp_count = 0
+            self._wake_diagnostic(
+                f"event=stream-time-base-reset source=_listen_audio "
+                f"reason=new-inputstream-lifetime "
+                f"input_latency={self._input_latency:.6f}"
+            )
 
             with _mic_stream:
                 print("[JARVIS] 🎤 Mic stream open")

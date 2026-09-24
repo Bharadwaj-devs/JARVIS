@@ -24,88 +24,67 @@ Once JARVIS remains in SLEEPING, that is the expected behaviour. Saying the wake
 
 A related upstream Mark LIV issue concerns unreliable sleep/wake resumption. Treat that as context, not proof of the local root cause.
 
-## First task
+## Task Status
 
-Diagnosis and instrumentation only.
+- **Task 1 — Sleep/Wake Race Reproduction + Instrumentation: COMPLETE.**
+- **Task 2 — Sleep/Wake State Fix: COMPLETE.**
+- **Task 3 — Capture-Time Boundary Fix: IMPLEMENTED, pending physical validation.**
+- **Manual Sleep Reliability: FIXES IMPLEMENTED, pending physical validation.**
 
-Do not implement the fix until the diagnostic evidence has been reviewed.
+## Confirmed Root Causes
 
-## Diagnostic questions
+1. **Epoch-stamp race (fixed in Task 2):** The microphone callback was stamping an in-flight audio frame with the later gate-check `epoch` (captured after the sleep transition) instead of the callback-entry `entry_epoch` (captured when the frame arrived). This allowed stale audio captured before manual Sleep to carry the post-sleep epoch value, bypassing the existing stale-epoch rejection in `_on_wake_detected()` and `wake()`.
 
-Trace every path that can move the assistant between SLEEPING and AWAKE.
+2. **Capture-time boundary (fixed in Task 3):** A sounddevice callback block can arrive AFTER the Sleep transition while containing audio samples captured BEFORE Sleep. The callback-entry epoch is insufficient to identify the true audio capture boundary because a 1024-sample / 16 kHz block spans ~64 ms. Physical runlog showed manual Sleep occurred ~58 ms before the failing callback, meaning the block straddled the Sleep boundary.
 
-Determine:
-- which code owns the authoritative awake/sleep state;
-- every caller that can wake or sleep JARVIS;
-- whether UI callbacks, wake-word callbacks, automatic sleep, or system/session logic can race;
-- whether multiple threads/callbacks mutate the same state;
-- whether stale wake-word frames or queued detection events survive a manual sleep;
-- whether already-captured audio can trigger a wake after sleeping;
-- whether the wake detector remains active after sleeping;
-- whether duplicate UI events can toggle the state twice;
-- whether there is any debounce, cooldown, generation, or session invalidation mechanism;
-- which synchronization primitives protect shared state.
+## Fixes Applied
 
-## Required diagnostics
+### Fix 1 — Epoch Stamp (main.py:1583)
+**Change:** `det.feed(indata, epoch=epoch)` → `det.feed(indata, epoch=entry_epoch)`
 
-Add only minimal, thread-safe diagnostic logging needed to establish the transition path.
+Ensures audio frames are tagged with the epoch at callback entry, so the detector's existing epoch validation correctly rejects frames captured before a manual Sleep transition.
 
-For each state transition, capture:
-- requested transition;
-- previous state;
-- new state;
-- source;
-- thread;
-- timestamp.
+### Fix 2 — Capture-Time Boundary (main.py)
+**New state:** `_stream_time_base`, `_sleep_stream_time` (PortAudio stream time ↔ Python monotonic correlation)
 
-Classify wake sources as:
-- UI/manual;
-- wake-word;
-- automatic/system;
-- unknown.
+**Implementation:**
+- Stream-time correlation established on first callback of each InputStream lifetime using `time_info.currentTime`
+- Correlation reset when new InputStream is created
+- Sleep boundary recorded in stream time at Sleep transition: `sleep_stream_time = monotonic - stream_time_base`
+- In callback, while sleeping: compute `block_start = inputBufferAdcTime`, `block_end = block_start + frames/SEND_SAMPLE_RATE`
+- Drop if `block_end <= sleep_boundary` (entirely pre-Sleep) or `block_start < sleep_boundary` (straddles)
+- Feed normally if `block_start >= sleep_boundary` (entirely post-Sleep)
+- Wake clears sleep boundary
+- No debounce/cooldown/threshold changes
 
-Classify sleep sources as:
-- UI/manual;
-- automatic sleep;
-- shutdown/session;
-- unknown.
+## Phase 1A Completion Status
 
-For wake-word events, capture:
-- timestamp;
-- current sleep/awake state;
-- detector enabled/disabled state;
-- accepted/rejected;
-- rejection reason.
+**Phase 1A is NOT COMPLETE yet.**
 
-Never log API keys, private conversation content, or raw audio.
+Completion requires successful **physical validation** of:
+1. Manual SLEEP NOW succeeds reliably (no multi-click requirement)
+2. Explicit manual sleep cannot be immediately undone by an in-flight/stale wake event
+3. Repeated wake/sleep cycles behave consistently
+4. Wake word still wakes JARVIS normally after it is asleep
+5. No duplicate wake transition from a single wake phrase
+6. UI reflects the authoritative core state
+7. No regression to the corrected sleeping microphone routing (Task 2 validated behavior)
 
-## Scope restrictions
+Physical validation has NOT been performed yet. This must be done on hardware with the actual microphone and wake-word detector running.
 
-For this diagnostic task, do not:
-- redesign the architecture;
-- change wake-word thresholds;
-- change microphone behaviour;
-- change the Gemini Live session architecture;
-- change unrelated tools;
-- fix other upstream issues;
-- implement the final race fix before diagnosis is reviewed.
+## Scope restrictions (remain in effect)
 
-## Completion criteria
-
-The task is complete only when the diagnostic work produces a clear evidence trail showing the relevant SLEEPING <-> AWAKE transition path.
-
-The agent report must include:
-1. files inspected;
-2. files changed;
-3. state-transition paths found;
-4. relevant threads/callbacks;
-5. exact diagnostic sequence observed during reproduction, when reproducible;
-6. likely race boundary only when supported by logs/code;
-7. remaining uncertainty;
-8. syntax/import validation performed.
+For this phase, do not:
+- redesign the architecture
+- change wake-word thresholds
+- change microphone behaviour
+- change the Gemini Live session architecture
+- change unrelated tools
+- fix other upstream issues
+- add a second parallel state system
+- remove the existing wake epoch/generation protection
+- add a new cooldown/debounce system
 
 ## Next step
 
-After this diagnosis is reviewed, create a separate bounded task for the smallest safe corrective change.
-
-Do not combine diagnosis and the final fix into one uncontrolled change.
+Perform physical validation on hardware. If validation passes, Phase 1A can be marked complete and Phase 1B (Microphone Responsiveness) can begin. If validation reveals issues, diagnose and apply the smallest additional fix.
