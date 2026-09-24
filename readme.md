@@ -1,15 +1,53 @@
-# ⚙️ MARK LIV (54)
-### The Ultimate Cross-Platform Personal AI Assistant — By FatihMakes
+# ⚙️ JARVIS — Mark LIV (54)
+### A personal JARVIS-style AI assistant built by Bharadwaj
 
-> 📺 **[Watch the full setup video on YouTube](https://www.youtube.com/@FatihMakes)**
+> Built from the [FatihMakes/Mark-LIV](https://github.com/FatihMakes/Mark-LIV) foundation and developed as **Bharadwaj-devs/JARVIS**.
 
-A real-time voice AI that can hear, see, speak, and control your computer — on any OS. Supports Windows, macOS, and Linux. Built on the Gemini Live API for native audio streaming, delivering zero subscriptions and total digital autonomy.
+A real-time voice AI that can hear, see, speak, and control your computer. The project keeps the Mark LIV architecture while evolving it through an evidence-driven JARVIS V3 roadmap focused first on reliability, verification, and truthful execution.
+
+**Current release:** v0.1.1 — Sleep/Wake Reliability  
+**Current development phase:** **Phase 1B — Live Voice Responsiveness**
+
+---
+
+## 🧭 Current Development Status
+
+JARVIS is being developed incrementally under **JARVIS Architecture Blueprint V3** rather than as a wholesale rewrite.
+
+| Status | Milestone |
+|---|---|
+| ✅ Complete | v0.1.0 — Mark LIV Foundation |
+| ✅ Complete | Phase 1A — Input + Sleep/Wake Reliability |
+| 🚧 Current | Phase 1B — Live Voice Responsiveness |
+| ⏭️ Next | Phase 1C — Truthful Tool Failure Handling |
+| ⏭️ Later | Phase 1D — State Verification |
+| ⏭️ Later | Phase 1E — Result Delivery Watchdog |
+| ⏭️ Later | Phase 1F — Live Regression / Hardware Validation |
+
+### Phase 1A — Completed
+
+Phase 1A is physically validated on the real Windows microphone and wake-word path. The completed reliability work includes:
+
+- race-safe manual Sleep/Wake state transitions,
+- wake epoch / generation protection against stale detector events,
+- capture-time filtering for microphone blocks that cross the Sleep boundary,
+- handling for DirectSound timing limitations and InputStream recreation,
+- wake-detector model-state reset across Sleep epochs,
+- authoritative core/UI synchronization for the wake control.
+
+Release milestone: **v0.1.1 — Sleep/Wake Reliability**.
+
+### Phase 1B — Current
+
+The next reliability target is the live voice path. The first step is **instrumentation before tuning**: identify whether user speech is being lost at the microphone callback, one of the existing audio gates, the outgoing queue, Gemini input, or downstream transcription/response handling.
+
+The canonical status is tracked in [`docs/CURRENT_PHASE.md`](docs/CURRENT_PHASE.md), with the full engineering constitution in [`docs/JARVIS_Blueprint_V3.md`](docs/JARVIS_Blueprint_V3.md).
 
 ---
 
 ## ✨ Overview
 
-**MARK LIV is the release where JARVIS gets a face.** A holographic head sits at the centre of the HUD and **speaks your assistant's words with real lip-sync** — not a jaw flapping to the volume meter, but actual mouth shapes: lips closing on *m*, *b*, *p*, spreading on *i*, rounding on *u*. Brows ride the sentence, the eyes flick between fixation points, and it blinks. Turn the sound down and you can follow roughly what it just said.
+**Mark LIV is the foundation this JARVIS project is built on.** A holographic head sits at the centre of the HUD and **speaks your assistant's words with real lip-sync** — not a jaw flapping to the volume meter, but actual mouth shapes: lips closing on *m*, *b*, *p*, spreading on *i*, rounding on *u*. Brows ride the sentence, the eyes flick between fixation points, and it blinks. Turn the sound down and you can follow roughly what it just said.
 
 It ships as **zero extra dependencies and one 25 KB asset**. The face is real measured human geometry; everything else — the skull, the rig, the lighting — is generated at startup and drawn in software, so it looks identical on a gaming rig and a 2013 laptop, with no GPU driver in the loop.
 
@@ -260,7 +298,33 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 
 ---
 
-## 🗺️ Mark Roadmap
+## 🗺️ JARVIS V3 Roadmap
+
+The project roadmap is now driven by **Blueprint V3**. The current focus is reliability before deeper autonomy and computer intelligence.
+
+| Phase | Focus | Status |
+|---|---|---|
+| **1A** | Input + Sleep/Wake Reliability | ✅ Complete |
+| **1B** | Live Voice Responsiveness | 🚧 Current |
+| **1C** | Truthful Tool Failure Handling | ⏭️ Next |
+| **1D** | State Verification | ⏭️ Planned |
+| **1E** | Result Delivery Watchdog | ⏭️ Planned |
+| **1F** | Live Regression / Hardware Validation | ⏭️ Planned |
+| **2** | Conversational Core | Later |
+| **3** | Memory / Lessons / Metrics | Later |
+| **4** | Inferred Learning | Later |
+| **5** | Task Engine | Later |
+| **6** | Computer Intelligence | Later |
+| **7** | System Intelligence | Later |
+| **8** | Proactive JARVIS | Later |
+| **9** | Security / Identity | Later |
+| **10** | Presence / HUD / Dashboard | Later |
+| **11** | Routines / Advanced Autonomy | Later |
+| **12** | Controlled Self-Improvement | Last |
+
+> The earlier Mark roadmap below is retained as upstream history and project lineage. It is not the current JARVIS development order.
+
+## 🗺️ Upstream Mark Roadmap
 
 | Mark | Focus |
 |---|---|
@@ -278,8 +342,8 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 ## ⚡ Quick Start
 
 ```bash
-git clone https://github.com/FatihMakes/Mark-LIV.git
-cd Mark-LIV
+git clone https://github.com/Bharadwaj-devs/JARVIS.git
+cd JARVIS
 python setup.py        # installs deps for YOUR OS + the browser automation engine
 python main.py
 ```
@@ -396,12 +460,14 @@ Licensed under **[Creative Commons BY-NC 4.0](https://creativecommons.org/licens
 
 ---
 
-## 👤 Connect with the Creator
+## 👤 Creator
 
-Engineered by a developer building a real-world JARVIS-style assistant.
-⭐ **Star the repository to support the journey to Mark 100.**
+Built and maintained by **Bharadwaj** as a personal JARVIS-style assistant project.
 
-| Platform | Link |
+The project began from the Mark LIV foundation by FatihMakes and is now being developed independently through the JARVIS V3 engineering roadmap.
+
+| Resource | Link |
 | --- | --- |
-| YouTube | [@FatihMakes](https://www.youtube.com/@FatihMakes) |
-| Instagram | [@fatihmakes](https://www.instagram.com/fatihmakes) |
+| GitHub Repository | [Bharadwaj-devs/JARVIS](https://github.com/Bharadwaj-devs/JARVIS) |
+| Blueprint V3 | [docs/JARVIS_Blueprint_V3.md](docs/JARVIS_Blueprint_V3.md) |
+| Current Phase | [docs/CURRENT_PHASE.md](docs/CURRENT_PHASE.md) |
