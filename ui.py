@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import math
 import os
 import platform
@@ -2928,6 +2929,7 @@ class MainWindow(QMainWindow):
     _confirm_sig    = pyqtSignal(str, str)   # (title, detail) — irreversible-action gate
     _confirm_hide_sig = pyqtSignal()
     _wake_dl_sig    = pyqtSignal(bool, str)  # wake-word install finished (ok, message)
+    _wake_state_sig = pyqtSignal()           # refresh wake controls from core state
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
@@ -3077,7 +3079,7 @@ class MainWindow(QMainWindow):
         self._update_metrics()
 
         self._log_sig.connect(self._log.append_log)
-        self._state_sig.connect(self._apply_state)
+        self._state_sig.connect(self._apply_state_and_refresh_wake)
         self._content_sig.connect(self._show_content)
         self._reconfig_sig.connect(self._show_setup)
         self._camera_sig.connect(self._show_camera_frame)
@@ -3087,6 +3089,7 @@ class MainWindow(QMainWindow):
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
         self._wake_dl_sig.connect(self._on_wake_install_done)
+        self._wake_state_sig.connect(self._refresh_wake_btns)
         self._quiz_sig.connect(self._show_quiz)
         self._quiz_hide_sig.connect(self._hide_quiz)
         self._review_sig.connect(self._show_review)
@@ -3998,10 +4001,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_drawer(self, checked: bool):
         if checked:
-            self._refresh_wake_btns()   # resolve wake state on open (lazy)
+            self._refresh_wake_btns()   # resolve authoritative state before showing
             self._position_quick_drawer()
             self._quick_drawer.show()
             self._quick_drawer.raise_()
+            # A wake callback may have crossed threads while the drawer was
+            # being opened. Resolve once more after Qt processes this show.
+            QTimer.singleShot(0, self._refresh_wake_btns)
         else:
             self._quick_drawer.hide()
 
@@ -4736,6 +4742,30 @@ class MainWindow(QMainWindow):
             self._wake_btn.setStyleSheet(_off)
             self._wake_sleep_btn.hide()
 
+    def _apply_state_and_refresh_wake(self, state: str):
+        self._ui_diagnostic(
+            f"event=ui-state-signal-received source=ui-state-signal "
+            f"state_signal={state}"
+        )
+        self._apply_state(state)
+        if state in ("LISTENING", "SLEEPING"):
+            self._refresh_wake_btns()
+            self._ui_diagnostic(
+                f"event=ui-wake-control-refreshed source=ui-state-signal "
+                f"state_signal={state} button={self._wake_sleep_btn.text()}"
+            )
+
+    def _ui_diagnostic(self, message: str) -> None:
+        try:
+            state = self.wake_get_state() if self.wake_get_state else {}
+            wake_state = "AWAKE" if state.get("awake") else "SLEEPING"
+        except Exception:
+            wake_state = "unavailable"
+        print(
+            f"[WakeUIDiag] timestamp={time.time():.6f} "
+            f"thread={threading.current_thread().name} wake_state={wake_state} {message}"
+        )
+
     def _refresh_talk_btns(self):
         """Repaint the push-to-talk row from the saved setting."""
         if not hasattr(self, "_ptt_btn"):
@@ -4893,12 +4923,16 @@ class MainWindow(QMainWindow):
         self._refresh_wake_btns()
 
     def _tap_wake_manual(self):
+        # Never infer the action from the existing label; refresh from core
+        # state immediately before dispatch and again after the transition.
+        self._refresh_wake_btns()
         if self.on_wake_manual:
             try:
                 self.on_wake_manual()
             except Exception:
                 pass
         self._refresh_wake_btns()
+        QTimer.singleShot(0, self._refresh_wake_btns)
 
     def _update_brief_btn(self, enabled: bool):
         if not hasattr(self, '_brief_btn'):
@@ -5369,7 +5403,23 @@ class JarvisUI:
         self._win.notify_phone_connected()
 
     def set_state(self, state: str):
+        caller = "unknown"
+        try:
+            caller = threading.current_thread().name
+            frame = inspect.currentframe()
+            if frame is not None and frame.f_back is not None:
+                caller = frame.f_back.f_code.co_name
+        except Exception:
+            pass
+        self._win._ui_diagnostic(
+            f"event=ui-state-signal-emitted source=set_state "
+            f"state_signal={state} caller={caller}"
+        )
         self._win._state_sig.emit(state)
+
+    def refresh_wake_controls(self) -> None:
+        """Thread-safe refresh of wake controls from the authoritative core state."""
+        self._win._wake_state_sig.emit()
 
     def write_log(self, text: str):
         self._win._log_sig.emit(text)

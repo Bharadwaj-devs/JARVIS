@@ -637,6 +637,16 @@ class JarvisLive:
         self._wake_detector: WakeWordDetector | None = None
         self._wake_sleep_timeout = WAKE_SLEEP_TIMEOUT
         self._wake_diag_lock = threading.Lock()
+        self._wake_state_lock = threading.RLock()
+        self._wake_epoch = 0
+        self._mic_callback_frames = 0
+        self._pc_mic_batch_id = 0
+        self._wake_diagnostic(
+            f"event=wake-state-initialized source=JarvisLive.__init__ "
+            f"jarvis_id={id(self)} "
+            f"wake_enabled={self._wake_enabled} "
+            f"wake_state={self._wake_diagnostic_state()} epoch={self._wake_epoch}"
+        )
 
         # Restore the saved push-to-talk preference. Doing it here rather than
         # in __init__ means the hotkey thread only exists once there is a
@@ -659,7 +669,33 @@ class JarvisLive:
         # A loaded, running detector is definitively ready; otherwise fall back
         # to the cheap on-disk model-file check (no Model construction).
         ready = bool(self._wake_detector and self._wake_detector.ready) or wake_is_ready()
-        return {"enabled": self._wake_enabled, "awake": self._awake, "ready": ready}
+        with self._wake_state_lock:
+            awake = self._awake
+        self._wake_diagnostic(
+            f"event=wake-state-read source=_wake_state jarvis_id={id(self)} "
+            f"wake_state={'AWAKE' if awake else 'SLEEPING'}"
+        )
+        return {"enabled": self._wake_enabled, "awake": awake, "ready": ready}
+
+    def _wake_snapshot(self) -> tuple[bool, int]:
+        with self._wake_state_lock:
+            awake, epoch = self._awake, self._wake_epoch
+        try:
+            caller = sys._getframe(1).f_code.co_name
+        except Exception:
+            caller = "unknown"
+        self._wake_diagnostic(
+            f"event=wake-snapshot source=_wake_snapshot jarvis_id={id(self)} "
+            f"caller={caller} wake_state={'AWAKE' if awake else 'SLEEPING'} "
+            f"epoch={epoch}"
+        )
+        return awake, epoch
+
+    def _sync_wake_ui(self) -> None:
+        try:
+            self.ui.refresh_wake_controls()
+        except Exception:
+            pass
 
     def _ensure_wake_detector(self) -> bool:
         """Load the detector once (model loads on first start). Idempotent."""
@@ -668,23 +704,67 @@ class JarvisLive:
                 on_detect=self._on_wake_detected,
                 logger=lambda m: print(f"[Wake] {m}"),
                 notify=lambda m: self.ui.write_log(f"SYS: {m}"),
+                state_provider=self._wake_diagnostic_state,
+            )
+            self._wake_diagnostic(
+                "event=detector-callback-registered source=wake-detector "
+                "callback=JarvisLive._on_wake_detected"
             )
         if not self._wake_detector.ready:
             return self._wake_detector.start()
         return True
 
-    def _on_wake_detected(self) -> None:
+    def _on_wake_detected(self, event_epoch: int | None = None) -> str:
         """Called from the detector thread when 'Hey Jarvis' is heard."""
+        self._wake_diagnostic(
+            f"event=production-wake-handler-entry source=production-wake-handler "
+            f"event_epoch={event_epoch} wake_state={self._wake_diagnostic_state()}"
+        )
         received_at = time.time()
         detector = self._wake_detector
         detector_state = "running" if detector and detector.running else "stopped"
-        awake_before = self._awake
-        result = self.wake(reason="wake word", source="wake-word")
+        awake_before, current_epoch = self._wake_snapshot()
+        if not self._wake_enabled:
+            result = "rejected:wake-word-disabled"
+            self._wake_diagnostic(
+                f"event=wake-word timestamp={received_at:.6f} "
+                f"state_before={'AWAKE' if awake_before else 'SLEEPING'} "
+                f"enabled=False detector={detector_state} "
+                f"event_epoch={event_epoch} current_epoch={current_epoch} "
+                f"outcome={result}"
+            )
+            self._wake_diagnostic(
+                f"event=production-wake-handler-exit source=production-wake-handler "
+                f"outcome={result} wake_state={self._wake_diagnostic_state()}"
+            )
+            return result
+        if event_epoch != current_epoch:
+            result = f"rejected:stale-epoch:{event_epoch}!={current_epoch}"
+            self._wake_diagnostic(
+                f"event=wake-word timestamp={received_at:.6f} "
+                f"state_before={'AWAKE' if awake_before else 'SLEEPING'} "
+                f"enabled={self._wake_enabled} detector={detector_state} "
+                f"event_epoch={event_epoch} current_epoch={current_epoch} "
+                f"outcome={result}"
+            )
+            self._wake_diagnostic(
+                f"event=production-wake-handler-exit source=production-wake-handler "
+                f"outcome={result} wake_state={self._wake_diagnostic_state()}"
+            )
+            return result
+        result = self.wake(
+            reason="wake word", source="wake-word", event_epoch=event_epoch
+        )
         self._wake_diagnostic(
             f"event=wake-word timestamp={received_at:.6f} "
             f"state_before={'AWAKE' if awake_before else 'SLEEPING'} "
             f"enabled={self._wake_enabled} detector={detector_state} "
+            f"event_epoch={event_epoch} current_epoch={current_epoch} "
             f"outcome={result}"
+        )
+        self._wake_diagnostic(
+            f"event=production-wake-handler-exit source=production-wake-handler "
+            f"outcome={result} wake_state={self._wake_diagnostic_state()}"
         )
         return result
 
@@ -695,6 +775,9 @@ class JarvisLive:
                 f"thread={threading.current_thread().name} {message}"
             )
 
+    def _wake_diagnostic_state(self) -> str:
+        return "AWAKE" if self._awake else "SLEEPING"
+
     def _record_state_transition(self, requested: str, previous: bool,
                                  new: bool, source: str) -> None:
         self._wake_diagnostic(
@@ -703,36 +786,85 @@ class JarvisLive:
             f"new={'AWAKE' if new else 'SLEEPING'} source={source}"
         )
 
-    def wake(self, reason: str = "wake word", source: str = "unknown") -> str:
-        previous = self._awake
-        if self._awake:
+    def wake(self, reason: str = "wake word", source: str = "unknown",
+             event_epoch: int | None = None) -> str:
+        self._wake_diagnostic(
+            f"event=wake-entry source=wake() reason={reason} "
+            f"event_epoch={event_epoch} wake_state={self._wake_diagnostic_state()}"
+        )
+        with self._wake_state_lock:
+            previous = self._awake
+            current_epoch = self._wake_epoch
+            if event_epoch is not None and event_epoch != current_epoch:
+                result = f"rejected:stale-epoch:{event_epoch}!={current_epoch}"
+                self._wake_diagnostic(
+                    f"event=state-request requested=WAKE "
+                    f"previous={'AWAKE' if previous else 'SLEEPING'} "
+                    f"new={'AWAKE' if previous else 'SLEEPING'} source={source} "
+                    f"event_epoch={event_epoch} current_epoch={current_epoch} "
+                    f"result={result}"
+                )
+                self._wake_diagnostic(
+                    f"event=wake-exit source=wake() outcome={result} "
+                    f"wake_state={self._wake_diagnostic_state()}"
+                )
+                return result
+            if self._awake:
+                result = "rejected:already-awake"
+            else:
+                epoch_before = self._wake_epoch
+                self._awake = True
+                self._wake_epoch += 1
+                self._wake_diagnostic(
+                    f"event=awake-write source=wake() previous_state=SLEEPING "
+                    f"new_state=AWAKE epoch_before={epoch_before} "
+                    f"epoch_after={self._wake_epoch}"
+                )
+                result = "accepted"
+        if result != "accepted":
             self._wake_diagnostic(
                 f"event=state-request requested=WAKE "
-                f"previous=AWAKE new=AWAKE source={source} result=rejected "
-                f"reason=already-awake"
+                f"previous={'AWAKE' if previous else 'SLEEPING'} "
+                f"new={'AWAKE' if self._awake else 'SLEEPING'} source={source} "
+                f"result={result}"
             )
-            return "rejected:already-awake"
-        self._awake = True
+            self._wake_diagnostic(
+                f"event=wake-exit source=wake() outcome={result} "
+                f"wake_state={self._wake_diagnostic_state()}"
+            )
+            return result
         self._record_state_transition("WAKE", previous, self._awake, source)
         self._last_user_speech = time.monotonic()   # start the auto-sleep clock now
         if not self.ui.muted:
             self.ui.set_state("LISTENING")
+        self._sync_wake_ui()
         self.ui.write_log(f"SYS: Awake — {reason}.")
+        self._wake_diagnostic(
+            f"event=wake-exit source=wake() outcome=accepted "
+            f"wake_state={self._wake_diagnostic_state()}"
+        )
         return "accepted"
 
     def sleep(self, reason: str = "timeout", source: str = "unknown") -> str:
-        previous = self._awake
-        if not self._awake:
+        with self._wake_state_lock:
+            previous = self._awake
+            if not self._awake:
+                result = "rejected:already-sleeping"
+            else:
+                self._awake = False
+                self._wake_epoch += 1
+                result = "accepted"
+        if result != "accepted":
             self._wake_diagnostic(
                 f"event=state-request requested=SLEEP "
                 f"previous=SLEEPING new=SLEEPING source={source} result=rejected "
                 f"reason=already-sleeping"
             )
-            return "rejected:already-sleeping"
-        self._awake = False
+            return result
         self._record_state_transition("SLEEP", previous, self._awake, source)
         self.set_speaking(False)
         self.ui.set_state("SLEEPING")
+        self._sync_wake_ui()
         self.ui.write_log(f"SYS: Sleeping — {reason}. Say 'Hey Jarvis' to wake me.")
         return "accepted"
 
@@ -763,9 +895,12 @@ class JarvisLive:
             self.sleep(reason="wake word enabled", source="UI/manual")
             return "enabled"
         else:
+            with self._wake_state_lock:
+                self._wake_epoch += 1
             self._wake_enabled = False
             save_wake_word_enabled(False)
             self.wake(reason="wake word disabled", source="UI/manual")
+            self._sync_wake_ui()
             return "disabled"
 
     def _ui_wake_manual(self) -> None:
@@ -947,12 +1082,21 @@ class JarvisLive:
             # Holding the key is also a way to wake it, so push-to-talk works
             # without having to say the wake word first.
             if self._wake_enabled and not self._awake:
-                previous = self._awake
-                self._awake = True
+                with self._wake_state_lock:
+                    previous = self._awake
+                    epoch_before = self._wake_epoch
+                    self._awake = True
+                    self._wake_epoch += 1
+                self._wake_diagnostic(
+                    f"event=awake-write source=_on_ptt previous_state=SLEEPING "
+                    f"new_state=AWAKE epoch_before={epoch_before} "
+                    f"epoch_after={self._wake_epoch}"
+                )
                 self._record_state_transition(
                     "WAKE", previous, self._awake, "UI/manual"
                 )
                 self._last_user_speech = time.monotonic()
+                self._sync_wake_ui()
         try:
             self.ui.set_state("LISTENING" if held else "SLEEPING")
         except Exception:
@@ -1328,6 +1472,14 @@ class JarvisLive:
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
+            self._wake_diagnostic(
+                f"event=gemini-audio-send source=out_queue "
+                f"wake_state={self._wake_diagnostic_state()} "
+                f"pc_batch_id={msg.get('_pc_batch_id', 'none')} "
+                f"captured_state={msg.get('_pc_captured_state', 'none')} "
+                f"captured_epoch={msg.get('_pc_captured_epoch', 'none')} "
+                f"mime_type={msg.get('mime_type', 'audio/pcm')}"
+            )
             # Gemini 3.x Live rejects the old realtime_input.media_chunks field
             # (what `media=...` maps to) and closes the socket with a 1007. Send
             # mic / phone PCM through the new `audio` field instead. Queue items
@@ -1340,11 +1492,69 @@ class JarvisLive:
                 )
             )
 
+    def _enqueue_pc_mic_audio(self, message: dict) -> None:
+        """Enqueue PC microphone audio with diagnostics; preserve queue behavior."""
+        try:
+            self.out_queue.put_nowait(message)
+            self._wake_diagnostic(
+                f"event=out-queue-enqueue source=pc-microphone "
+                f"producer=_listen_audio.callback accepted=True "
+                f"chunk_bytes={len(message.get('data', b''))} "
+                f"wake_state={self._wake_diagnostic_state()} "
+                f"pc_batch_id={message.get('_pc_batch_id', 'unknown')} "
+                f"captured_state={message.get('_pc_captured_state', 'unknown')} "
+                f"captured_epoch={message.get('_pc_captured_epoch', 'unknown')} "
+                f"scheduled_state={message.get('_pc_scheduled_state', 'unknown')}"
+            )
+        except asyncio.QueueFull:
+            self._wake_diagnostic(
+                f"event=out-queue-enqueue source=pc-microphone "
+                f"producer=_listen_audio.callback accepted=False "
+                f"reason=queue-full chunk_bytes={len(message.get('data', b''))} "
+                f"wake_state={self._wake_diagnostic_state()} "
+                f"pc_batch_id={message.get('_pc_batch_id', 'unknown')}"
+            )
+            raise
+
+    def _enqueue_phone_audio(self, chunk) -> None:
+        """Enqueue phone relay audio with diagnostics; preserve queue behavior."""
+        try:
+            self.out_queue.put_nowait(chunk)
+            self._wake_diagnostic(
+                f"event=out-queue-enqueue source=phone-relay "
+                f"producer=_relay_phone_audio accepted=True "
+                f"chunk_bytes={len(chunk.get('data', b'')) if isinstance(chunk, dict) else len(chunk)} "
+                f"wake_state={self._wake_diagnostic_state()}"
+            )
+        except asyncio.QueueFull:
+            self._wake_diagnostic(
+                f"event=out-queue-enqueue source=phone-relay "
+                f"producer=_relay_phone_audio accepted=False reason=queue-full "
+                f"wake_state={self._wake_diagnostic_state()}"
+            )
+            pass
+
     async def _listen_audio(self):
         print("[JARVIS] 🎤 Mic started")
         loop = asyncio.get_event_loop()
 
         def callback(indata, frames, time_info, status):
+            self._mic_callback_frames += 1
+            self._pc_mic_batch_id += 1
+            pc_batch_id = f"pc-mic-{self._pc_mic_batch_id}"
+            awake_at_entry, entry_epoch = self._wake_snapshot()
+            authoritative_awake_at_entry, authoritative_epoch = self._wake_snapshot()
+            detector_at_entry = self._wake_detector
+            self._wake_diagnostic(
+                f"event=microphone-callback-entry source=pc-microphone "
+                f"pc_batch_id={pc_batch_id} "
+                f"frame_count={frames} callback_count={self._mic_callback_frames} "
+                f"wake_state={'AWAKE' if awake_at_entry else 'SLEEPING'} "
+                f"authoritative_state={'AWAKE' if authoritative_awake_at_entry else 'SLEEPING'} "
+                f"wake_enabled={self._wake_enabled} "
+                f"detector_running={bool(detector_at_entry and detector_at_entry.running)} "
+                f"epoch={entry_epoch} authoritative_epoch={authoritative_epoch}"
+            )
             # ── Wake-word gate ───────────────────────────────────────────────
             # While asleep, the mic audio NEVER goes to Gemini (nothing is
             # streamed, so JARVIS can't respond to speech not addressed to it and
@@ -1352,10 +1562,32 @@ class JarvisLive:
             # detector, which runs its model in ITS OWN thread — the cost here is
             # only a queue push, so the audio path is never slowed. When wake word
             # is off (default) or we're awake, this is a single boolean check.
-            if self._wake_enabled and not self._awake:
+            awake, epoch = self._wake_snapshot()
+            if self._wake_enabled and not awake:
                 det = self._wake_detector
+                self._wake_diagnostic(
+                    f"event=microphone-sleep-gate source=microphone "
+                    f"wake_state={'AWAKE' if awake else 'SLEEPING'} "
+                    f"detector_present={det is not None} "
+                    f"detector_running={bool(det and det.running)} epoch={epoch} "
+                    "gemini_forwarded=False"
+                )
                 if det is not None:
-                    det.feed(indata)
+                    self._wake_diagnostic(
+                        f"event=detector-feed-before source=pc-microphone "
+                        f"producer=_listen_audio.callback pc_batch_id={pc_batch_id} "
+                        f"entry_state={'AWAKE' if awake_at_entry else 'SLEEPING'} "
+                        f"entry_epoch={entry_epoch} epoch={epoch} "
+                        f"wake_state={self._wake_diagnostic_state()}"
+                    )
+                    det.feed(indata, epoch=epoch)
+                    self._wake_diagnostic(
+                        f"event=detector-feed-after source=pc-microphone "
+                        f"producer=_listen_audio.callback pc_batch_id={pc_batch_id} "
+                        f"entry_state={'AWAKE' if awake_at_entry else 'SLEEPING'} "
+                        f"entry_epoch={entry_epoch} epoch={epoch} "
+                        f"wake_state={self._wake_diagnostic_state()}"
+                    )
                 return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
@@ -1406,9 +1638,27 @@ class JarvisLive:
 
             if not self.ui.muted and not self._phone_active:
                 data = indata.tobytes()
+                scheduled_awake, scheduled_epoch = self._wake_snapshot()
+                self._wake_diagnostic(
+                    f"event=pc-microphone-enqueue-scheduled source=pc-microphone "
+                    f"producer=_listen_audio.callback pc_batch_id={pc_batch_id} "
+                    f"entry_state={'AWAKE' if awake_at_entry else 'SLEEPING'} "
+                    f"entry_epoch={entry_epoch} "
+                    f"scheduled_state={'AWAKE' if scheduled_awake else 'SLEEPING'} "
+                    f"scheduled_epoch={scheduled_epoch} "
+                    f"wake_state={self._wake_diagnostic_state()}"
+                )
                 loop.call_soon_threadsafe(
-                    self.out_queue.put_nowait,
-                    {"data": data, "mime_type": "audio/pcm"}
+                    self._enqueue_pc_mic_audio,
+                    {
+                        "data": data,
+                        "mime_type": "audio/pcm",
+                        "_pc_batch_id": pc_batch_id,
+                        "_pc_captured_state": "AWAKE" if awake_at_entry else "SLEEPING",
+                        "_pc_captured_epoch": entry_epoch,
+                        "_pc_scheduled_state": "AWAKE" if scheduled_awake else "SLEEPING",
+                        "_pc_scheduled_epoch": scheduled_epoch,
+                    }
                 )
                 # Feed the live mic level to the HUD so the waveform reacts to
                 # the user's actual voice while listening. Purely cosmetic — any
@@ -2046,7 +2296,7 @@ class JarvisLive:
                 speaking = self._is_speaking
             if not speaking and not self.ui.muted:
                 try:
-                    self.out_queue.put_nowait(chunk)
+                    self._enqueue_phone_audio(chunk)
                 except asyncio.QueueFull:
                     pass
 
@@ -2168,22 +2418,52 @@ class JarvisLive:
                     # until the user says "Hey Jarvis" or taps wake in the UI.
                     if self._wake_enabled:
                         self._ensure_wake_detector()
-                        previous = self._awake
-                        self._awake = False
+                        with self._wake_state_lock:
+                            previous = self._awake
+                            previous_epoch = self._wake_epoch
+                            self._awake = False
+                            self._wake_epoch += 1
+                            current_epoch = self._wake_epoch
+                        self._wake_diagnostic(
+                            f"event=startup-sleep-boundary source=session-startup "
+                            f"previous_state={'AWAKE' if previous else 'SLEEPING'} "
+                            f"new_state=SLEEPING previous_epoch={previous_epoch} "
+                            f"new_epoch={current_epoch}"
+                        )
                         if previous != self._awake:
                             self._record_state_transition(
                                 "SLEEP", previous, self._awake, "shutdown/session"
                             )
+                            self._sync_wake_ui()
                         self.ui.set_state("SLEEPING")
+                        self._sync_wake_ui()
                         self.ui.write_log("SYS: JARVIS online — sleeping. Say 'Hey Jarvis' to wake me.")
                     else:
-                        previous = self._awake
-                        self._awake = True
+                        with self._wake_state_lock:
+                            previous = self._awake
+                            previous_epoch = self._wake_epoch
+                            self._awake = True
+                            self._wake_epoch += 1
+                            current_epoch = self._wake_epoch
+                        self._wake_diagnostic(
+                            f"event=awake-write source=session-startup "
+                            f"previous_state={'AWAKE' if previous else 'SLEEPING'} "
+                            f"new_state=AWAKE epoch_before={previous_epoch} "
+                            f"epoch_after={current_epoch}"
+                        )
+                        self._wake_diagnostic(
+                            f"event=startup-wake-boundary source=session-startup "
+                            f"previous_state={'AWAKE' if previous else 'SLEEPING'} "
+                            f"new_state=AWAKE previous_epoch={previous_epoch} "
+                            f"new_epoch={current_epoch}"
+                        )
                         if previous != self._awake:
                             self._record_state_transition(
                                 "WAKE", previous, self._awake, "shutdown/session"
                             )
+                            self._sync_wake_ui()
                         self.ui.set_state("LISTENING")
+                        self._sync_wake_ui()
                         self.ui.write_log("SYS: JARVIS online.")
 
                     if self._dashboard:

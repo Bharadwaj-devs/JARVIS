@@ -114,25 +114,36 @@ class WakeWordDetector:
     the callback must marshal to whatever loop/UI it needs).
     """
 
-    def __init__(self, on_detect: Callable[[], None],
+    def __init__(self, on_detect: Callable[[int | None], None],
                  threshold: float = DEFAULT_THRESHOLD,
                  logger: Callable[[str], None] = print,
-                 notify: Callable[[str], None] | None = None):
+                 notify: Callable[[str], None] | None = None,
+                 state_provider: Callable[[], str] | None = None):
         self._on_detect = on_detect
         self._threshold = threshold
         self._logger    = logger
         # See PluginRegistry: `logger` is the console and gets everything,
         # `notify` is the activity log and gets only what the user must act on.
         self._notify    = notify or (lambda _msg: None)
+        self._state_provider = state_provider
         self._queue: queue.Queue = queue.Queue(maxsize=50)
         self._thread: threading.Thread | None = None
         self._running = False
         self._model = None
         self._ready = False
+        self._fed_frames = 0
+        self._ignored_frames = 0
 
     def _diagnostic(self, message: str) -> None:
         """Write detector ordering diagnostics without touching the audio path."""
-        self._logger(f"Wake diagnostic: {message}")
+        try:
+            wake_state = self._state_provider() if self._state_provider else "unknown"
+        except Exception:
+            wake_state = "unavailable"
+        self._logger(
+            f"Wake diagnostic: timestamp={time.time():.6f} "
+            f"thread={threading.current_thread().name} wake_state={wake_state} {message}"
+        )
 
     def start(self) -> bool:
         """Load the model and spawn the inference thread. Returns True on success.
@@ -143,6 +154,10 @@ class WakeWordDetector:
             from openwakeword.model import Model
             self._model = Model(wakeword_models=[WAKE_MODEL], inference_framework="onnx")
         except Exception as e:
+            self._diagnostic(
+                f"event=detector-start-failed source=wake-detector "
+                f"error_type={type(e).__name__}"
+            )
             self._logger(f"Wake word: could not load model — {e}")
             self._notify("Wake word unavailable — use the WAKE NOW button.")
             self._model = None
@@ -151,6 +166,9 @@ class WakeWordDetector:
         self._ready = True
         self._thread = threading.Thread(target=self._loop, daemon=True, name="WakeWordThread")
         self._thread.start()
+        self._diagnostic(
+            "event=detector-started source=wake-detector model_ready=True"
+        )
         self._logger("Wake word: listening for 'Hey Jarvis'.")
         return True
 
@@ -172,15 +190,29 @@ class WakeWordDetector:
     def running(self) -> bool:
         return self._running
 
-    def feed(self, frame_int16) -> None:
+    def feed(self, frame_int16, epoch: int | None = None) -> None:
         """Called from the mic callback (real-time thread). Must stay cheap and
         never block — the frame is copied and dropped if the queue is backed up."""
         if not self._running:
+            self._ignored_frames += 1
+            if self._ignored_frames == 1 or self._ignored_frames % 100 == 0:
+                self._diagnostic(
+                    f"event=detector-feed-ignored source=microphone "
+                    f"reason=detector-not-running frame_count={self._ignored_frames} "
+                    f"ready={self._ready}"
+                )
             return
         try:
             # frame_int16 is a numpy int16 array (possibly 2-D mono) — flatten to 1-D
             data = frame_int16[:, 0].copy() if getattr(frame_int16, "ndim", 1) > 1 else frame_int16.copy()
-            self._queue.put_nowait(data)
+            self._queue.put_nowait((data, epoch))
+            self._fed_frames += 1
+            if self._fed_frames == 1 or self._fed_frames % 100 == 0:
+                self._diagnostic(
+                    f"event=detector-feed source=microphone "
+                    f"frame_count={self._fed_frames} epoch={epoch} "
+                    f"queue_depth={self._queue.qsize()}"
+                )
         except queue.Full:
             pass
         except Exception:
@@ -190,9 +222,13 @@ class WakeWordDetector:
         import numpy as np
         while self._running:
             try:
-                frame = self._queue.get()
-                if frame is None or not self._running:
+                item = self._queue.get()
+                if item is None or not self._running:
                     break
+                if isinstance(item, tuple) and len(item) == 2:
+                    frame, epoch = item
+                else:
+                    frame, epoch = item, None
                 inference_started_at = time.time()
                 scores = self._model.predict(np.asarray(frame, dtype=np.int16))
                 score = 0.0
@@ -215,16 +251,20 @@ class WakeWordDetector:
                         f"queue_before_drain={backlog}"
                     )
                     try:
-                        result = self._on_detect()
+                        self._diagnostic(
+                            f"event=detector-callback-firing source=wake-detector "
+                            f"epoch={epoch} callback_args=epoch"
+                        )
+                        result = self._on_detect(epoch)
                         outcome = str(result) if result is not None else "callback-returned"
                         self._diagnostic(
                             f"event=detected timestamp={detected_at:.6f} "
-                            f"detector={state} outcome={outcome}"
+                            f"detector={state} epoch={epoch} outcome={outcome}"
                         )
                     except Exception as e:
                         self._diagnostic(
                             f"event=detected timestamp={detected_at:.6f} "
-                            f"detector={state} outcome=callback-error"
+                            f"detector={state} epoch={epoch} outcome=callback-error"
                         )
                         self._logger(f"Wake word: on_detect error — {e}")
             except Exception as e:
