@@ -1,7 +1,7 @@
 # JARVIS Architecture Blueprint V3 — Mark LIV (54)
 
 **Status:** Engineering specification / working constitution  
-**Updated:** 2026-09-24  
+**Updated:** 2026-09-30  
 **Canonical development repository:** `Bharadwaj-devs/JARVIS`  
 **Frozen foundation tag:** `v0.1.0` — Mark LIV Foundation  
 **Foundation commit:** `1078760a65e622bb1aa65dad09e0cea953834bfe`  
@@ -360,8 +360,8 @@ Those gates make the system sophisticated, but they also create several places w
 - the callback may return early during echo-tail handling,
 - the callback may return early while PTT is not held,
 - input transcription updates `_last_user_speech`,
-- raw mic frames themselves are not currently exposed through a structured diagnostic counter set,
-- wake detection occurs in its own thread while asleep.
+- Phase 1B Task 3 now exposes the microphone path through structured counters for callback health, gate drops, Gemini sends, queue pressure and wake-event suppression,
+- wake detection continues in its own thread while asleep, with the completed epoch/state protections from Phase 1A feeding the telemetry.
 
 ### Required instrumentation before tuning
 
@@ -381,7 +381,7 @@ last microphone callback timestamp
 last outgoing audio timestamp
 last user transcription timestamp
 wake detections
-wake detections suppressed as stale/cooldown
+wake detections suppressed as stale epoch / already awake
 ```
 
 This is not optional polish. Without it, changing thresholds blindly will not reveal where the user's speech disappears.
@@ -447,7 +447,7 @@ Minimum requirements:
 
 - explicit enable/disable state,
 - explicit detector running state,
-- wake cooldown / re-arm interval,
+- generation/epoch validation across manual state changes,
 - stale-event suppression after manual sleep,
 - detector readiness state distinct from package installation,
 - compatibility failure reported clearly,
@@ -477,11 +477,23 @@ Optimize only after measuring these intervals.
 
 # 8. PHASE 1B — LIVE VOICE RESPONSIVENESS
 
-## 8.1 Microphone observability
+## 8.1 Microphone observability — COMPLETE
 
-Add the counters listed in Section 5.2.
+Phase 1B Task 3 added the counters listed in Section 5.2 to `main.py` without changing microphone thresholds, queue policy, echo policy, wake/sleep semantics, or UI architecture.
 
-The diagnostic path must remain lightweight enough to run in the audio callback.
+The instrumentation covers callback health, gate-specific drops, successful PC microphone → Gemini sends, queue-full drops, queue depth/high-water and wait timings, transcription/turn timing, and wake-event suppression.
+
+The live validation checkpoint confirmed:
+
+```text
+~15.6 Hz microphone callback cadence
+PC microphone audio successfully reaching Gemini
+normal-load queue depth remaining healthy
+wake detections and wake-state transitions functioning
+repeated wake-word testing while already awake performed manually
+```
+
+Task 3 establishes observability; it does not claim that the underlying microphone reliability defect is fixed.
 
 ## 8.2 Audio queue integrity
 
@@ -746,7 +758,7 @@ The phase is not complete when the code imports. It is complete only after real 
 6. enable/disable wake mode
 7. system sleep → system resume
 8. system sleep → resume → microphone test
-9. repeated wake phrases during cooldown
+9. repeated wake phrases while already awake
 ```
 
 Pass condition:
@@ -1397,24 +1409,40 @@ wake-word enabled
 no immediate wake after manual sleep
 ```
 
-## Task 3 — Microphone Path Instrumentation — NEXT (PHASE 1B)
+## Task 3 — Microphone Path Instrumentation — COMPLETE
 
-Inspect and instrument:
+Implemented in `main.py` as observational telemetry around the existing microphone path.
 
-```text
-main.py:_listen_audio
-main.py:_send_realtime
-core/echo.py
-core/audio_devices.py
-```
-
-Goal:
+Recorded/validated:
 
 ```text
-identify exactly where user speech is discarded or delayed
+callback health and cadence
+sleep/speaking/echo/PTT/mute/phone gate drops
+PC microphone scheduling
+PC microphone → Gemini successful sends
+queue-full drops and queue latency
+wake detections
+stale-epoch suppression
+already-awake suppression
+transcription / turn timing
 ```
 
-No threshold redesign before the discard path is known.
+Validation:
+
+- syntax validation passed;
+- Git diff validation passed;
+- live microphone runtime exercised on the target Windows setup;
+- normal PC microphone → Gemini flow observed;
+- repeated wake-word testing while already awake performed manually;
+- no Phase 1A state-machine behaviour was intentionally redesigned.
+
+Task 3 acceptance is therefore complete. The evidence collected here is the input to Task 4.
+
+## Task 4 — Microphone Reliability Fix — NEXT (PHASE 1B)
+
+Use the Task 3 telemetry to identify the smallest proven discard/delay boundary.
+
+Do not tune thresholds or redesign the audio path without evidence from the observed boundary.
 
 ## Task 4 — Microphone Reliability Fix
 
