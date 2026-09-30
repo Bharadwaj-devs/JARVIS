@@ -651,6 +651,36 @@ class JarvisLive:
         self._stream_time_valid: bool = True
         self._last_current_time: float = -1.0
         self._zero_timestamp_count: int = 0
+        # Microphone path instrumentation (Phase 1B Task 3) — observational only
+        self._mic_cb_received = 0
+        self._mic_cb_routed_to_detector = 0
+        self._mic_cb_dropped_speaking = 0
+        self._mic_cb_dropped_echo = 0
+        self._mic_cb_dropped_ptt = 0
+        self._mic_cb_dropped_mute = 0
+        self._mic_cb_dropped_phone = 0
+        self._mic_cb_scheduled = 0
+        self._mic_cb_last_ts = 0.0
+        # Additional discard/success counters (Phase 1B Task 3)
+        self._mic_cb_dropped_asleep = 0
+        self._mic_cb_sent_to_gemini = 0
+        self._mic_cb_dropped_queue_full = 0
+        self._mic_last_sent_ts = 0.0
+        self._mic_wake_detections = 0
+        self._mic_wake_suppressed_stale = 0
+        self._mic_wake_suppressed_already_awake = 0
+        # Aggregate telemetry state (Phase 1B Task 3)
+        self._mic_telemetry_lock = threading.Lock()
+        self._mic_cb_intervals = []           # inter-callback intervals (seconds)
+        self._mic_rms_values = []             # RMS levels per callback
+        self._mic_cb_overflow_count = 0       # PortAudio input overflow
+        self._mic_cb_underflow_count = 0      # PortAudio input underflow
+        self._mic_queue_wait_samples = []     # queue wait times (seconds)
+        self._mic_send_wait_samples = []      # send await times (seconds)
+        self._mic_queue_high_water = 0        # peak queue depth in interval
+        self._mic_last_input_transcription_ts = 0.0  # monotonic timestamp
+        self._mic_last_turn_complete_ts = 0.0        # monotonic timestamp
+        self._mic_turn_complete_latency_samples = [] # turn_complete - last input transcription
         self._wake_diagnostic(
             f"event=wake-state-initialized source=JarvisLive.__init__ "
             f"jarvis_id={id(self)} "
@@ -726,6 +756,7 @@ class JarvisLive:
 
     def _on_wake_detected(self, event_epoch: int | None = None) -> str:
         """Called from the detector thread when 'Hey Jarvis' is heard."""
+        self._mic_wake_detections += 1
         self._wake_diagnostic(
             f"event=production-wake-handler-entry source=production-wake-handler "
             f"event_epoch={event_epoch} wake_state={self._wake_diagnostic_state()}"
@@ -750,6 +781,7 @@ class JarvisLive:
             return result
         if event_epoch != current_epoch:
             result = f"rejected:stale-epoch:{event_epoch}!={current_epoch}"
+            self._mic_wake_suppressed_stale += 1
             self._wake_diagnostic(
                 f"event=wake-word timestamp={received_at:.6f} "
                 f"state_before={'AWAKE' if awake_before else 'SLEEPING'} "
@@ -765,6 +797,8 @@ class JarvisLive:
         result = self.wake(
             reason="wake word", source="wake-word", event_epoch=event_epoch
         )
+        if result == "rejected:already-awake":
+            self._mic_wake_suppressed_already_awake += 1
         self._wake_diagnostic(
             f"event=wake-word timestamp={received_at:.6f} "
             f"state_before={'AWAKE' if awake_before else 'SLEEPING'} "
@@ -1516,6 +1550,23 @@ class JarvisLive:
     async def _send_realtime(self):
         while True:
             msg = await self.out_queue.get()
+            dequeue_ts = time.monotonic()
+            # Queue wait time: from enqueue to dequeue
+            enqueue_ts = msg.get("_enqueue_ts")
+            if enqueue_ts is not None:
+                queue_wait = dequeue_ts - enqueue_ts
+                with self._mic_telemetry_lock:
+                    self._mic_queue_wait_samples.append(queue_wait)
+                    if len(self._mic_queue_wait_samples) > 1000:
+                        self._mic_queue_wait_samples = self._mic_queue_wait_samples[-1000:]
+            # Track queue depth high-water mark
+            try:
+                qsize = self.out_queue.qsize()
+                with self._mic_telemetry_lock:
+                    if qsize > self._mic_queue_high_water:
+                        self._mic_queue_high_water = qsize
+            except Exception:
+                pass
             self._wake_diagnostic(
                 f"event=gemini-audio-send source=out_queue "
                 f"wake_state={self._wake_diagnostic_state()} "
@@ -1529,15 +1580,27 @@ class JarvisLive:
             # mic / phone PCM through the new `audio` field instead. Queue items
             # are {"data": <bytes>, "mime_type": <str>} from _listen_audio and
             # the phone relay.
+            send_start = time.monotonic()
             await self.session.send_realtime_input(
                 audio=types.Blob(
                     data=msg["data"],
                     mime_type=msg.get("mime_type", "audio/pcm"),
                 )
             )
+            # Count only PC microphone audio (phone relay lacks _pc_batch_id)
+            if msg.get("_pc_batch_id") is not None:
+                self._mic_cb_sent_to_gemini += 1
+                self._mic_last_sent_ts = time.monotonic()
+            send_elapsed = time.monotonic() - send_start
+            with self._mic_telemetry_lock:
+                self._mic_send_wait_samples.append(send_elapsed)
+                if len(self._mic_send_wait_samples) > 1000:
+                    self._mic_send_wait_samples = self._mic_send_wait_samples[-1000:]
 
     def _enqueue_pc_mic_audio(self, message: dict) -> None:
         """Enqueue PC microphone audio with diagnostics; preserve queue behavior."""
+        # Add enqueue timestamp for queue/send latency measurement
+        message["_enqueue_ts"] = time.monotonic()
         try:
             self.out_queue.put_nowait(message)
             self._wake_diagnostic(
@@ -1551,6 +1614,7 @@ class JarvisLive:
                 f"scheduled_state={message.get('_pc_scheduled_state', 'unknown')}"
             )
         except asyncio.QueueFull:
+            self._mic_cb_dropped_queue_full += 1
             self._wake_diagnostic(
                 f"event=out-queue-enqueue source=pc-microphone "
                 f"producer=_listen_audio.callback accepted=False "
@@ -1584,11 +1648,40 @@ class JarvisLive:
 
         def callback(indata, frames, time_info, status):
             self._mic_callback_frames += 1
+            self._mic_cb_received += 1
+            now_mono = time.monotonic()
+            # Track inter-callback interval for timing health
+            if self._mic_cb_last_ts > 0.0:
+                interval = now_mono - self._mic_cb_last_ts
+                with self._mic_telemetry_lock:
+                    self._mic_cb_intervals.append(interval)
+                    if len(self._mic_cb_intervals) > 1000:
+                        self._mic_cb_intervals = self._mic_cb_intervals[-1000:]
+            self._mic_cb_last_ts = now_mono
             self._pc_mic_batch_id += 1
             pc_batch_id = f"pc-mic-{self._pc_mic_batch_id}"
             awake_at_entry, entry_epoch = self._wake_snapshot()
             authoritative_awake_at_entry, authoritative_epoch = self._wake_snapshot()
             detector_at_entry = self._wake_detector
+            # Track PortAudio callback status flags (overflow/underflow)
+            try:
+                import sounddevice as sd
+                if status:
+                    if getattr(status, 'input_overflow', False):
+                        self._mic_cb_overflow_count += 1
+                    if getattr(status, 'input_underflow', False):
+                        self._mic_cb_underflow_count += 1
+            except Exception:
+                pass
+            # Compute RMS level for aggregate signal health (reuse existing _pcm_level)
+            try:
+                rms = _pcm_level(indata)
+                with self._mic_telemetry_lock:
+                    self._mic_rms_values.append(rms)
+                    if len(self._mic_rms_values) > 1000:
+                        self._mic_rms_values = self._mic_rms_values[-1000:]
+            except Exception:
+                pass
             self._wake_diagnostic(
                 f"event=microphone-callback-entry source=pc-microphone "
                 f"pc_batch_id={pc_batch_id} "
@@ -1685,6 +1778,7 @@ class JarvisLive:
                             f"capture_start={capture_start:.6f} capture_end={capture_end:.6f} "
                             f"sleep_boundary={sleep_boundary:.6f} pc_batch_id={pc_batch_id}"
                         )
+                        self._mic_cb_dropped_asleep += 1
                         return
                     elif capture_start < sleep_boundary:
                         self._wake_diagnostic(
@@ -1693,6 +1787,7 @@ class JarvisLive:
                             f"capture_start={capture_start:.6f} capture_end={capture_end:.6f} "
                             f"sleep_boundary={sleep_boundary:.6f} pc_batch_id={pc_batch_id}"
                         )
+                        self._mic_cb_dropped_asleep += 1
                         return
                     # else: capture_start >= sleep_boundary → entirely after Sleep, feed normally
 
@@ -1713,6 +1808,7 @@ class JarvisLive:
                         f"wake_state={self._wake_diagnostic_state()}"
                     )
                     det.feed(indata, epoch=entry_epoch)
+                    self._mic_cb_routed_to_detector += 1
                     self._wake_diagnostic(
                         f"event=detector-feed-after source=pc-microphone "
                         f"producer=_listen_audio.callback pc_batch_id={pc_batch_id} "
@@ -1720,6 +1816,8 @@ class JarvisLive:
                         f"entry_epoch={entry_epoch} epoch={epoch} "
                         f"wake_state={self._wake_diagnostic_state()}"
                     )
+                else:
+                    self._mic_cb_dropped_asleep += 1
                 return
             with self._speaking_lock:
                 jarvis_speaking = self._is_speaking
@@ -1742,6 +1840,7 @@ class JarvisLive:
                 # block here and call interrupt() after `required_blocks` of
                 # agreement — but it depends on the listener's room, so it stays
                 # out until it can be tried on real hardware.
+                self._mic_cb_dropped_speaking += 1
                 return
 
             # ── Echo tail ────────────────────────────────────────────────────
@@ -1754,6 +1853,7 @@ class JarvisLive:
                 try:
                     if not self._echo.is_user_speech(
                             indata, SEND_SAMPLE_RATE, _pcm_level(indata)):
+                        self._mic_cb_dropped_echo += 1
                         return
                     self._tail_until = 0.0      # a real voice ends the tail early
                 except Exception:
@@ -1766,6 +1866,7 @@ class JarvisLive:
             # opens it, which is the whole point: nothing leaves the machine
             # unless you are holding the key.
             if self._ptt_enabled and not self._ptt_held:
+                self._mic_cb_dropped_ptt += 1
                 return
 
             if not self.ui.muted and not self._phone_active:
@@ -1792,6 +1893,7 @@ class JarvisLive:
                         "_pc_scheduled_epoch": scheduled_epoch,
                     }
                 )
+                self._mic_cb_scheduled += 1
                 # Feed the live mic level to the HUD so the waveform reacts to
                 # the user's actual voice while listening. Purely cosmetic — any
                 # failure here must never disturb the mic.
@@ -1799,6 +1901,12 @@ class JarvisLive:
                     self.ui.set_audio_level(_pcm_level(indata))
                 except Exception:
                     pass
+            else:
+                if self.ui.muted:
+                    self._mic_cb_dropped_mute += 1
+                if self._phone_active:
+                    self._mic_cb_dropped_phone += 1
+                return
 
         try:
             def _open_mic(dev):
@@ -1958,8 +2066,20 @@ class JarvisLive:
                             if txt:
                                 in_buf.append(txt)
                                 self._last_user_speech = time.monotonic()
+                                # Track latest input transcription timestamp for turn timing
+                                self._mic_last_input_transcription_ts = time.monotonic()
 
                         if sc.turn_complete:
+                            turn_complete_ts = time.monotonic()
+                            self._mic_last_turn_complete_ts = turn_complete_ts
+                            # Track turn completion latency from last input transcription
+                            last_input_ts = self._mic_last_input_transcription_ts
+                            if last_input_ts > 0.0:
+                                turn_latency = turn_complete_ts - last_input_ts
+                                with self._mic_telemetry_lock:
+                                    self._mic_turn_complete_latency_samples.append(turn_latency)
+                                    if len(self._mic_turn_complete_latency_samples) > 1000:
+                                        self._mic_turn_complete_latency_samples = self._mic_turn_complete_latency_samples[-1000:]
                             if self._turn_done_event:
                                 self._turn_done_event.set()
 
@@ -2483,6 +2603,107 @@ class JarvisLive:
                 print(f"[Dashboard] Command error: {e}")
                 await asyncio.sleep(0.5)
 
+    # ── Microphone telemetry ─────────────────────────────────────────────────────
+    # Periodic aggregate summary of microphone health, queue pressure, and turn timing.
+    # Runs inside the session TaskGroup so it is cancelled automatically on session end.
+    async def _run_mic_telemetry(self) -> None:
+        """Emit periodic aggregate microphone/session telemetry (every ~30s)."""
+        while True:
+            await asyncio.sleep(30.0)
+            # Snapshot all telemetry state under lock
+            with self._mic_telemetry_lock:
+                cb_count = self._mic_cb_received
+                intervals = list(self._mic_cb_intervals)
+                rms_values = list(self._mic_rms_values)
+                overflow = self._mic_cb_overflow_count
+                underflow = self._mic_cb_underflow_count
+                queue_wait = list(self._mic_queue_wait_samples)
+                send_wait = list(self._mic_send_wait_samples)
+                queue_high_water = self._mic_queue_high_water
+                turn_latencies = list(self._mic_turn_complete_latency_samples)
+                # New cumulative counters (Phase 1B Task 3)
+                dropped_asleep = self._mic_cb_dropped_asleep
+                sent_to_gemini = self._mic_cb_sent_to_gemini
+                dropped_queue_full = self._mic_cb_dropped_queue_full
+                last_sent_ts = self._mic_last_sent_ts
+                wake_detections = self._mic_wake_detections
+                wake_suppressed_stale = self._mic_wake_suppressed_stale
+                wake_suppressed_already_awake = self._mic_wake_suppressed_already_awake
+                # Reset interval-tracking accumulators
+                self._mic_cb_intervals.clear()
+                self._mic_rms_values.clear()
+                self._mic_queue_wait_samples.clear()
+                self._mic_send_wait_samples.clear()
+                self._mic_queue_high_water = 0
+                self._mic_turn_complete_latency_samples.clear()
+                # Preserve cumulative counters across intervals
+                # (overflow/underflow are cumulative for the session)
+
+            # Compute callback rate
+            rate = 0.0
+            if intervals:
+                total_time = sum(intervals)
+                if total_time > 0:
+                    rate = len(intervals) / total_time
+
+            # Compute interval stats
+            int_min = int_mean = int_max = 0.0
+            if intervals:
+                int_min = min(intervals) * 1000.0  # ms
+                int_max = max(intervals) * 1000.0
+                int_mean = (sum(intervals) / len(intervals)) * 1000.0
+
+            # Compute RMS stats
+            rms_min = rms_max = rms_mean = 0.0
+            if rms_values:
+                rms_min = min(rms_values)
+                rms_max = max(rms_values)
+                rms_mean = sum(rms_values) / len(rms_values)
+
+            # Compute queue wait percentiles (p50, p99)
+            qw_p50 = qw_p99 = 0.0
+            if queue_wait:
+                qw_sorted = sorted(queue_wait)
+                qw_p50 = qw_sorted[len(qw_sorted) // 2] * 1000.0  # ms
+                qw_p99 = qw_sorted[int(len(qw_sorted) * 0.99)] * 1000.0
+
+            # Compute send wait percentiles (p50, p99)
+            sw_p50 = sw_p99 = 0.0
+            if send_wait:
+                sw_sorted = sorted(send_wait)
+                sw_p50 = sw_sorted[len(sw_sorted) // 2] * 1000.0
+                sw_p99 = sw_sorted[int(len(sw_sorted) * 0.99)] * 1000.0
+
+            # Compute turn complete latency percentiles
+            tl_p50 = tl_p99 = 0.0
+            if turn_latencies:
+                tl_sorted = sorted(turn_latencies)
+                tl_p50 = tl_sorted[len(tl_sorted) // 2] * 1000.0
+                tl_p99 = tl_sorted[int(len(tl_sorted) * 0.99)] * 1000.0
+
+            # Current queue depth
+            try:
+                qdepth = self.out_queue.qsize() if self.out_queue else 0
+            except Exception:
+                qdepth = 0
+
+            print(
+                f"[MicTelemetry] callbacks={cb_count} rate={rate:.1f}Hz "
+                f"int_min={int_min:.1f}ms int_mean={int_mean:.1f}ms int_max={int_max:.1f}ms "
+                f"rms_min={rms_min:.3f} rms_max={rms_max:.3f} rms_mean={rms_mean:.3f} "
+                f"overflow={overflow} underflow={underflow} "
+                f"drops: asleep={dropped_asleep} speaking={self._mic_cb_dropped_speaking} echo={self._mic_cb_dropped_echo} "
+                f"ptt={self._mic_cb_dropped_ptt} mute={self._mic_cb_dropped_mute} phone={self._mic_cb_dropped_phone} "
+                f"queue_full={dropped_queue_full} "
+                f"sent_to_gemini={sent_to_gemini} last_sent_ts={last_sent_ts:.3f} "
+                f"detector={self._mic_cb_routed_to_detector} scheduled={self._mic_cb_scheduled} "
+                f"wake_det={wake_detections} wake_stale={wake_suppressed_stale} wake_awake={wake_suppressed_already_awake} "
+                f"queue_depth={qdepth} queue_high_water={queue_high_water} "
+                f"queue_wait_p50={qw_p50:.1f}ms queue_wait_p99={qw_p99:.1f}ms "
+                f"send_wait_p50={sw_p50:.1f}ms send_wait_p99={sw_p99:.1f}ms "
+                f"turn_latency_p50={tl_p50:.1f}ms turn_latency_p99={tl_p99:.1f}ms"
+            )
+
     # ── main loop ───────────────────────────────────────────────────────────
 
     async def run(self):
@@ -2625,6 +2846,7 @@ class JarvisLive:
                     tg.create_task(self._run_background_monitor())
                     tg.create_task(self._run_proactive_mode())
                     tg.create_task(self._run_sleep_watch())
+                    tg.create_task(self._run_mic_telemetry())
                     if self._dashboard:
                         tg.create_task(self._relay_phone_audio())
 
