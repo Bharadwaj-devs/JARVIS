@@ -842,6 +842,15 @@ Also verify that these existing capabilities still work:
 # 13. VERSIONING AFTER V3
 
 The release strategy remains simple.
+Versioning convention:
+
+```text
+0.1.x = Phase 1 development / alpha / beta checkpoints
+0.2.0 = completed and stable Phase 1 release
+0.2.1+ = subsequent development after Phase 1
+```
+
+Intermediate Phase 1 tags are checkpoints, not completed-phase releases. The final `v0.2.0` tag is created only after the full Phase 1 live-validation gate passes.
 
 ```text
 v0.1.0            Mark LIV Foundation
@@ -851,7 +860,8 @@ v0.1.3-alpha.1   Phase 1C — truthful failures
 v0.1.4-beta.1    Phase 1D — verification
 v0.1.5-beta.1    Phase 1E — delivery watchdog
 
-v0.1.6            Mark LIV Reliability Core
+v0.2.0            Phase 1 — Mark LIV Reliability Core (stable)
+v0.2.1            Phase 2 — Conversational Core (next development line)
 ```
 
 Intermediate tags are optional. The full release `v0.2.0` is created only after the live validation gate passes.
