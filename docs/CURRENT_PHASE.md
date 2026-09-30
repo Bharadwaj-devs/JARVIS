@@ -2,12 +2,12 @@
 
 ## Baseline
 
-Current release checkpoint: v0.2.0-alpha.2 — Phase 1B Task 3: Microphone Path Instrumentation
+Current release checkpoint: v0.1.2-alpha.1 — Phase 1B Task 3: Microphone Path Instrumentation
 Baseline release: v0.1.1 — Sleep/Wake Reliability
 Foundation release: v0.1.0 — Mark LIV Foundation
 Repository: Bharadwaj-devs/JARVIS
 
-The v0.1.0 release remains the recoverable clean Mark LIV foundation. v0.1.1 records the completed Phase 1A sleep/wake reliability work. v0.2.0-alpha.2 records the completed Phase 1B Task 3 instrumentation checkpoint.
+The v0.1.0 release remains the recoverable clean Mark LIV foundation. v0.1.1 records the completed Phase 1A sleep/wake reliability work. v0.1.2-alpha.1 records the completed Phase 1B Task 3 instrumentation checkpoint.
 
 ## Current phase
 
