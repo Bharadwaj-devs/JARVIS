@@ -411,7 +411,7 @@ PHASE 1E  RESULT DELIVERY WATCHDOG
 PHASE 1F  LIVE REGRESSION / HARDWARE VALIDATION
 ```
 
-Only after the entire phase passes do we publish `v0.2.0`.
+Only after the full Phase 1 reliability gate passes do we publish the stable Phase 1 release.
 
 ---
 
@@ -844,15 +844,14 @@ Also verify that these existing capabilities still work:
 The release strategy remains simple.
 
 ```text
-v0.1.0  Mark LIV Foundation
+v0.1.0            Mark LIV Foundation
+v0.1.1            Phase 1A — sleep/wake reliability
+v0.1.2-alpha.1   Phase 1B — voice responsiveness / Task 3 checkpoint
+v0.1.3-alpha.1   Phase 1C — truthful failures
+v0.1.4-beta.1    Phase 1D — verification
+v0.1.5-beta.1    Phase 1E — delivery watchdog
 
-v0.2.0-alpha.1  Phase 1A — sleep/wake
-v0.2.0-alpha.2  Phase 1B — voice responsiveness
-v0.2.0-alpha.3  Phase 1C — truthful failures
-v0.2.0-beta.1   Phase 1D — verification
-v0.2.0-beta.2   Phase 1E — delivery watchdog
-
-v0.2.0          Mark LIV Reliability Core
+v0.1.6            Mark LIV Reliability Core
 ```
 
 Intermediate tags are optional. The full release `v0.2.0` is created only after the live validation gate passes.
